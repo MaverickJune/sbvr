@@ -41,27 +41,27 @@ def print_errors(tensor1, tensor2, log_ext=False, **kwargs):
     if log_ext:
         curr_dir = os.path.dirname(os.path.abspath(__file__))
         curr_datetime = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_path = os.path.join(curr_dir, "logs", f"error.log")
+        log_path = os.path.join(curr_dir, "logs", f"error.txt")
         parent_dir = os.path.dirname(log_path)
         os.makedirs(parent_dir, exist_ok=True)
         
         if not os.path.exists(log_path):
             with open(log_path, "w") as f:
                 pass
-        
+            
         log_text = (
-            r_str("Errors: ") +
-            y_str("Mean: ") + f"{mse:.4e}" + ", " +
-            y_str("Max: ") + f"{max_error:.4e}" + ", " +
-            y_str("Min: ") + f"{min_error:.4e}" + ", " +
-            y_str("Std. Dev.: ") + f"{std_dev:.4e}"
+            "Errors: "
+            + "Mean: " + f"{mse:.4e}" + ", "
+            + "Max: " + f"{max_error:.4e}" + ", "
+            + "Min: " + f"{min_error:.4e}" + ", "
+            + "Std. Dev.: " + f"{std_dev:.4e}" + "\n\n"
         )
         
         with open(log_path, "a") as log_file:
-            print(f"Timestamp: {curr_datetime} \n", file=log_file)
+            log_file.write(f"Timestamp: {curr_datetime}\n")
             if kwargs.get("num_sums", None) is not None:
-                print(f"Num Sums: {kwargs['num_sums']}", file=log_file)
-            print(log_text, file=log_file)
+                log_file.write(f"Num Sums: {kwargs['num_sums']}\n")
+            log_file.write(log_text)
         
     
 def f64_matmul(mat_a, mat_b):
@@ -83,7 +83,7 @@ class sbvr():
         self.coeff_group_size = coeff_group_size
         self.coeff_dtype = data.dtype if coeff_dtype is None else coeff_dtype
         self.bin_vec_dtype = \
-            torch.uint32 if bin_vec_dtype is None else bin_vec_dtype
+            torch.int32 if bin_vec_dtype is None else bin_vec_dtype
         
         self.original_dtype = data.dtype
         self.original_data_shape = data.shape
@@ -344,11 +344,11 @@ def test_with_llama3_weight():
     print(b_str("Case 2: Conversion to sbvr 8 bit"))
     print_errors(ffn_weight, restored_weight_sbvr_8, log_ext=True, num_sums=8)
     print(b_str("Case 3: Conversion to sbvr 6 bit"))
-    print_errors(ffn_weight, restored_weight_sbvr_6)
+    print_errors(ffn_weight, restored_weight_sbvr_6, log_ext=True, num_sums=6)
     print(b_str("Case 4: Conversion to sbvr 4 bit"))
-    print_errors(ffn_weight, restored_weight_sbvr_4)
+    print_errors(ffn_weight, restored_weight_sbvr_4, log_ext=True, num_sums=4)
     print(b_str("Case 5: Conversion to sbvr 2 bit"))
-    print_errors(ffn_weight, restored_weight_sbvr_2)
+    print_errors(ffn_weight, restored_weight_sbvr_2, log_ext=True, num_sums=2)
     
     
 if __name__ == "__main__":
