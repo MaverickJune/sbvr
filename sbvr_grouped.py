@@ -5,8 +5,8 @@ import os
 import sys
 import datetime
 
-from bvq_utils.utils_llama import get_llama, get_layer_ffn_weight
-from bvq_utils.log_config import get_logger
+from sbvr_utils.utils_llama import get_llama, get_layer_ffn_weight
+from sbvr_utils.log_config import get_logger
 logger = get_logger(__name__)
 
 def r_str(s):
@@ -223,6 +223,7 @@ class sbvr():
                                      device=self.coeff.device)
         
         for i in range(num_coeff_groups):
+            logger.info(f"Encoding group {i + 1}/{num_coeff_groups}")
             group_start = i * self.coeff_group_size
             group_end = \
                 min(group_start + self.coeff_group_size, data_num)
@@ -332,6 +333,8 @@ def test_with_llama3_weight():
     model, _ = get_llama(MODEL_PATH)
     ffn_weight = get_layer_ffn_weight(model, TARGET_LAYER_IDX)
     logger.info(f"ffn_weight shape: {ffn_weight.shape}")
+    logger.info(f"ffn_weight dtype: {ffn_weight.dtype}")
+    logger.info(f"ffn_weight device: {ffn_weight.device}")
     
     restored_weight_sbvr_10 = sbvr(ffn_weight, num_sums=10).get_decoded_tensor()
     restored_weight_sbvr_8 = sbvr(ffn_weight, num_sums=8).get_decoded_tensor()

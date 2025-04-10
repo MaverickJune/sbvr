@@ -2,7 +2,7 @@ from transformers import LlamaForCausalLM, AutoTokenizer
 import torch
 import torch.nn as nn
 
-from bvq_utils.log_config import get_logger
+from sbvr_utils.log_config import get_logger
 logger = get_logger(__name__)
 
 
@@ -28,12 +28,13 @@ def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="met
     return model, tokenizer
 
 
+@torch.no_grad()
 def get_layer_ffn_weight(model, layer_idx):
     r"""
     Get the ffn(gate_proj) weight of the decoder layer[layer_idx] from the llama model
     """
     ffn_weight = model.model.layers[layer_idx].mlp.gate_proj.weight
-    ffn_weight = ffn_weight.detach().cpu().clone()
+    ffn_weight = ffn_weight.detach().clone()
 
     return ffn_weight
 
