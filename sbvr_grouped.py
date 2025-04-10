@@ -64,54 +64,39 @@ class sbvr():
         )
         return bin_combs @ coeff + coeff_bias
     
-    def __map_data_to_coeff(self, 
-                            data: torch.tensor, 
-                            coeff_bias: torch.tensor, 
-                            coeff: torch.tensor):
-        all_points = self.__get_all_points(coeff_bias, coeff)
-        diff = torch.abs(data.unsqueeze(1) - all_points)
-        coeff_idx = torch.argmin(diff, dim=1)
-        return all_points[coeff_idx], coeff_idx, all_points
-        
-    def __return_coeff_mse(self, data, coeff_bias, coeff):
-        predicted, coeff_idx, all_points = \
-            self.__map_data_to_coeff(data, coeff_bias, coeff)
-        errors = data - predicted
-        mse = torch.mean(errors ** 2).item()
-        return mse, predicted, coeff_idx, all_points
     
     def __encode_data_grouped(self, data):
         data_max = torch.max(data)
         data_avg = torch.mean(data)
         data_min = torch.min(data)
-        data_65 = torch.quantile(data, 0.65)
+        data_97 = torch.quantile(data, 0.97)
 
         min_mse = 1e10
-        r_max = math.pi*2/3
-        r_gran = (r_max - 1.0) / 32
-        b_gran = (data_avg - data_min) / 16
-        s_gran = (data_max - data_65) / 128
-        
-        r_min = 1.0 + r_gran
-        s_min = data_65 - data_avg
-        s_max = data_max - data_avg
-        b_min = data_min
+        r_max = math.pi*2/3 + 0.1
+        r_min = 1.0
+        r_gran = (r_max - r_min) / 64
         b_max = data_avg
+        b_min = data_min - (abs(data_min)*0.1)
+        b_gran = (b_max - b_min) / 32
+        s_max = (data_max - data_min) * 1.1
+        s_min = (data_97 - data_avg) * 2
+        s_gran = (s_max - s_min) / 32
         
+        print(r_str("\tnum_sums: ") + f"{self.num_sums}")
         print(r_str("\tR search range: ") + f"{(1.0 + r_gran):.4e} to " + 
               f"{r_max:.4e}, " +
               r_str("search granularity: ") + f"{r_gran:.4e}")
         print(r_str("\tBias search range: ") + f"{data_min:.4e} to " + 
               f"{data_avg:.4e}, " +
               r_str("search granularity: ") + f"{b_gran:.4e}")
-        print(r_str("\tScale search range: ") + f"{data_65 - data_avg:.4e} to " +
+        print(r_str("\tScale search range: ") + f"{data_97 - data_avg:.4e} to " +
               f"{(data_max - data_avg):.4e}, " +
               r_str("search granularity: ") + f"{s_gran:.4e}")
         
-        r_list = torch.arange(r_min + r_gran, r_max + r_gran, r_gran)
-        s_list = torch.arange(s_min, s_max + s_gran, s_gran)
-        b_list = torch.arange(b_min, b_max + b_gran, b_gran)
-        exponents = torch.arange(self.num_sums)
+        r_list = torch.arange(r_min + r_gran, r_max + r_gran, r_gran, device=data.device)
+        s_list = torch.arange(s_min, s_max + s_gran, s_gran, device=data.device)
+        b_list = torch.arange(b_min, b_max + b_gran, b_gran, device=data.device)
+        exponents = torch.arange(self.num_sums, device=data.device)
 
         # Construct the base search space
         search_space = r_list.unsqueeze(1) ** exponents.unsqueeze(0)
@@ -120,12 +105,16 @@ class sbvr():
         # Multiply by s_list
         search_space = s_list.view(-1, 1, 1) * search_space.unsqueeze(0)
         search_space = search_space.view(-1, self.num_sums)
-
+        
+        search_space = search_space.to(data.dtype)
+        
         print(g_str("\tSearch space: ") + str(search_space))
         print(g_str("\tSearch space shape: ") + str(search_space.shape))
 
         len_search_space = search_space.shape[0]
-        search_range = 4096
+        search_range = 256
+        
+        print(g_str("\tDiff matrix size: ") + str(search_range * (2**self.num_sums) * data.shape[0] * b_list.shape[0] * 4 / 1024 / 1024 / 1024) + " GB")
 
         # Loop over the bias values
         for search_start in range(0, len_search_space, search_range):
@@ -148,16 +137,21 @@ class sbvr():
                 best_r = r_list[r_idx]
                 best_s = s_list[scale_idx]
                 
+        print (g_str("Best MSE: ") + f"{min_mse:.4e}" +
+            ", " + g_str("Coeff: ") + str(best_coeff) +
+            ", " + g_str("(r, b, s): ") + f"{best_r:.4e}, " +
+            f"{best_bias.item():.4e}, {best_s:.4e}")
+                
         return best_bias, best_coeff, best_coeff_idx
-            
-         
+    
             
     def __get_min_mse_coeff(self, biased_data, search_matrix):
         bin_combs = torch.tensor(
             list(itertools.product([0, 1], repeat=self.num_sums)),
             dtype=biased_data.dtype, device=biased_data.device
         ).T
-        candidiate_matrix = bin_combs @ search_matrix
+        
+        candidiate_matrix = search_matrix @ bin_combs
         
         data_size = biased_data.shape[1]
         bias_list_size = biased_data.shape[0]
@@ -168,75 +162,19 @@ class sbvr():
         candidiate_matrix = candidiate_matrix.view(1, n_ss_row, 1, n_ss_col)
         
         diff = torch.abs(biased_data - candidiate_matrix)
-        diff, coeff_comb_indices = diff.min(dim=-1) # (bias_list_size, n_ss_row, data_size)
-        diff = diff ** 2
-        mse = diff.sum(dim=-1)
+        diff_selected, coeff_comb_indices = diff.min(dim=-1) # (bias_list_size, n_ss_row, data_size)
+        diff_selected = diff_selected ** 2
+        mse = diff_selected.mean(dim=-1)
         
         flat_min_idx = mse.view(-1).argmin()
         min_idx = torch.unravel_index(flat_min_idx, mse.shape)
-        bias_idx, coeff_set_idx = min_idx.unbind()
+        bias_idx, coeff_set_idx = min_idx
         coeff_comb_idx = coeff_comb_indices[bias_idx, coeff_set_idx]
         min_mse = mse[bias_idx, coeff_set_idx]
         min_mse = min_mse.item()
         
         return min_mse, bias_idx, coeff_set_idx, coeff_comb_idx
         
-        
-        
-        
-    def __encode_data(self, data):
-        data_max = torch.max(data)
-        data_avg = torch.mean(data)
-        data_min = torch.min(data)
-        data_65 = torch.quantile(data, 0.65)
-
-        min_mse = 1e10
-        r_max = math.pi*2/3
-        r_gran = (r_max - 1.0) / 32
-        b_gran = (data_avg - data_min) / 16
-        s_gran = (data_max - data_65) / 128
-        print(r_str("\tR search range: ") + f"{(1.0 + r_gran):.4e} to " + 
-              f"{r_max:.4e}, " +
-              r_str("search granularity: ") + f"{r_gran:.4e}")
-        print(r_str("\tBias search range: ") + f"{data_min:.4e} to " + 
-              f"{data_avg:.4e}, " +
-              r_str("search granularity: ") + f"{b_gran:.4e}")
-        print(r_str("\tScale search range: ") + f"{data_65 - data_avg:.4e} to " +
-              f"{(data_max - data_avg):.4e}, " +
-              r_str("search granularity: ") + f"{s_gran:.4e}")
-        
-        for r in torch.arange(1.0 + r_gran, r_max, r_gran):
-            coeff = torch.tensor([r**i for i in range(self.num_sums)],
-                dtype=data.dtype, device=data.device)
-            coeff_sum = torch.sum(coeff)
-            coeff_norm = coeff / coeff_sum
-            for scale in \
-                torch.arange((data_65 - data_avg), 
-                             (data_max - data_avg) + s_gran, s_gran):
-                coeff = coeff_norm * (2 * scale)
-                for coeff_bias in \
-                    torch.arange(data_min, data_avg + b_gran, b_gran):
-                    coeff_bias = coeff_bias.to(data.dtype)
-                    mse, predicted, coeff_idx, all_points = \
-                        self.__return_coeff_mse(data, coeff_bias, coeff)
-                    if mse < min_mse:
-                        min_mse = mse
-                        best_bias = coeff_bias
-                        best_coeff = coeff
-                        best_predicted = predicted
-                        best_coeff_idx = coeff_idx
-                        best_all_points = all_points
-                        best_r = r
-                        best_s = scale
-        print (g_str("Best MSE: ") + f"{min_mse:.4e}" +
-               ", " + g_str("Coeff: ") + str(best_coeff) +
-                ", " + g_str("(r, b, s): ") + f"{best_r:.4e}, "
-                f"{best_bias.item():.4e}, {best_s:.4e}")
-        print(y_str("all_points: ") + str(torch.sort(best_all_points)[0]) +
-              y_str("\nOriginal Data: ") + str(data) +
-              y_str("\nMapped Data: ") + str(best_predicted))
-
-        return best_bias, best_coeff, best_coeff_idx
         
     def __encode_to_sbvr(self, data):
         print(b_str("Encoding to SBVR..."))
@@ -256,7 +194,7 @@ class sbvr():
             group_end = \
                 min(group_start + self.coeff_group_size, data_num)
             group_data = data.flatten()[group_start:group_end].to(torch.float64)
-            coeff_bias, coeff, coeff_idx = self.__encode_data(group_data)
+            coeff_bias, coeff, coeff_idx = self.__encode_data_grouped(group_data)
             self.coeff_bias[i] = coeff_bias.item()
             self.coeff[i] = coeff
             self.coeff_idx[group_start:group_end] = coeff_idx
