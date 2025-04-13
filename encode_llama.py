@@ -1,5 +1,6 @@
 from transformers import LlamaForCausalLM, AutoTokenizer
 from models.sbvr_llama import SBVRLlamaForCausalLM
+from sbvr_utils.utils_llama import get_llama
 import torch
 import torch.nn as nn
 import torch.multiprocessing as mp
@@ -15,9 +16,9 @@ def process_single_decoder_layer(layer_idx, target_layer, curr_device, num_sums=
     logger.info(f"Processing layer {layer_idx} on GPU {curr_device}...")
     
     attn_weights = [
-        ("q", target_layer.attention.q_proj.weight),
-        ("k", target_layer.attention.k_proj.weight),
-        ("v", target_layer.attention.v_proj.weight),
+        ("q", target_layer.self_attn.q_proj.weight),
+        ("k", target_layer.self_attn.k_proj.weight),
+        ("v", target_layer.self_attn.v_proj.weight),
     ]
     ffn_weights = [
         ("gate_proj", target_layer.mlp.gate_proj.weight),
@@ -85,7 +86,7 @@ def process_sbvr_llama_multi_gpu(model, num_sums=4, save_path="compressed_weight
             
         proc_list[curr_device] = mp.Process(
             target=process_single_decoder_layer,
-            args=(layer_idx, model.mode.layers[layer_idx].cpu(), curr_device, num_sums, save_path)
+            args=(layer_idx, model.model.layers[layer_idx].cpu(), curr_device, num_sums, save_path)
         )
         proc_list[curr_device].start()
         curr_device = (curr_device + 1) % n_gpus
@@ -97,3 +98,12 @@ def process_sbvr_llama_multi_gpu(model, num_sums=4, save_path="compressed_weight
         
     logger.info("Processing complete")
 
+
+if __name__ == "__main__":
+    MODEL_PATH = "meta-llama/Llama-3.1-8B-Instruct"
+    NUM_SUMS = 4
+    SAVE_PATH = "compressed_weights"
+    
+    model, tokenizer = get_llama(model_path=MODEL_PATH, device_map="cpu")
+    process_sbvr_llama_multi_gpu(model, num_sums=NUM_SUMS, save_path=SAVE_PATH)
+    
