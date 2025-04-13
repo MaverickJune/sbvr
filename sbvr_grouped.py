@@ -195,7 +195,7 @@ class sbvr():
         n_ss_col = candidiate_matrix.shape[1]
         
         biased_data = biased_data.view(bias_list_size, 1, data_size, 1)
-        candidiate_matrix = candidiate_matrix.view(1, n_ss_row, 1, n_ss_col)
+        candidiate_matrix = candidiate_matrix.view(1, n_ss_row, 1, n_ss_col) # (group_size, 2**num_sums)
         
         diff = (biased_data - candidiate_matrix)**2
 

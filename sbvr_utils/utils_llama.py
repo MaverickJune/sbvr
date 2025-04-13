@@ -1,12 +1,15 @@
 from transformers import LlamaForCausalLM, AutoTokenizer
+from models.sbvr_llama import SBVRLlamaForCausalLM
 import torch
 import torch.nn as nn
+import torch.multiprocessing as mp
 
 from sbvr_utils.log_config import get_logger
 logger = get_logger(__name__)
 
-
-def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="meta-llama/Llama-3.2-3B-Instruct"):
+@torch.no_grad()
+def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="meta-llama/Llama-3.2-3B-Instruct", 
+              device_map:str ="auto", use_sbvr:bool = False):
     r'''
     Fetch llama model from huggingfaces
 
@@ -16,12 +19,19 @@ def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="met
 
     if not tokenizer_path:
         tokenizer_path = model_path
-
-    model = LlamaForCausalLM.from_pretrained(
-        model_path,
-        torch_dtype=torch.float16,
-        device_map='auto'
-    )
+    if use_sbvr:
+        logger.info("Using SBVR Llama model")
+        model = SBVRLlamaForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch.float16,
+            device_map=device_map
+        )
+    else:
+        model = LlamaForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch.float16,
+            device_map=device_map
+        )
     model.eval()
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=False)
     
