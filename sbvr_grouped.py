@@ -112,8 +112,8 @@ class sbvr():
         diff_mat_size = 3 * b_search_num * (2**self.num_sums) * \
             coeff_group_size * torch.tensor(0, dtype=self.compute_dtype, 
                                    device=data.device).element_size()
-        total_mem = torch.cuda.get_device_properties(data.device).total_memory
-        self.search_batch_size = int(total_mem * 0.90 / diff_mat_size)
+        total_mem = torch.cuda.mem_get_info()[0]
+        self.search_batch_size = int(total_mem * 0.85 / diff_mat_size)
         self.min_search_cache_num = min_search_cache_num
         self.max_coeff_search_cache_num = max_coeff_search_cache_num
         self.max_bias_search_cache_num = max_bias_search_cache_num
