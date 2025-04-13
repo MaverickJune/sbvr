@@ -161,14 +161,14 @@ class sbvr():
         s_min = (data_97 - data_avg) * 2.0
         s_gran = (s_max - s_min) / self.s_search_num
         
-        print(b_str("\nNum_sums: ") + f"{self.num_sums}")
-        print(y_str("\tR search range: ") + f"{(1.0 + r_gran):.4e} to " + 
+        print(b_str("\tNum_sums: ") + f"{self.num_sums}")
+        print(y_str("\t\tR search range: ") + f"{(1.0 + r_gran):.4e} to " + 
               f"{r_max:.4e}, " +
               y_str("search granularity: ") + f"{r_gran:.4e}")
-        print(y_str("\tBias search range: ") + f"{data_min:.4e} to " + 
+        print(y_str("\t\tBias search range: ") + f"{data_min:.4e} to " + 
               f"{data_avg:.4e}, " +
               y_str("search granularity: ") + f"{b_gran:.4e}")
-        print(y_str("\tScale search range: ") + 
+        print(y_str("\t\tScale search range: ") + 
               f"{((data_97 - data_avg*2.0)):.4e} to " +
               f"{((data_max - data_min)*1.1):.4e}, " +
               y_str("search granularity: ") + f"{s_gran:.4e}")
@@ -252,13 +252,22 @@ class sbvr():
             cutoff_mse = sum(mse_window) / len(mse_window)
             if min_mse < cutoff_mse:
                 self.cache_hits += 1
-                print (b_str("\nCache Hit ") +
-                    f"({self.cache_hits / (self.runs):.2f}) - " +
-                    y_str("Best MSE: ") + f"{min_mse:.4e}" +
-                    ", " + y_str("Cutoff MSE: ") + f"{cutoff_mse:.4e}" +
-                    ", " + y_str("Coeff: ") + str(best_coeff) +
-                    ", " + y_str("Bias: ") + f"{best_bias.item():.4e}")
+                # print (b_str("\nCache Hit ") +
+                #     f"({self.cache_hits / (self.runs):.2f}) - " +
+                #     y_str("Best MSE: ") + f"{min_mse:.4e}" +
+                #     ", " + y_str("Cutoff MSE: ") + f"{cutoff_mse:.4e}" +
+                #     ", " + y_str("Coeff: ") + str(best_coeff.tolist()) +
+                #     ", " + y_str("Bias: ") + f"{best_bias.item():.4e}")
                 return best_bias, best_coeff, best_coeff_idx
+            else:
+                print (r_str("\n\tCache Miss ") +
+                    f"({self.cache_hits / (self.runs):.2f}) - " +
+                    y_str("Cutoff MSE: ") + f"{cutoff_mse:.4e}" +
+                    ", " + y_str("Best MSE: ") + f"{min_mse:.4e}" +
+                    ", " + y_str("Bias: ") + f"{best_bias.item():.4e} " +
+                    y_str("\n\t\tCoeff: ") + str(best_coeff.tolist()))
+        else:
+            print(r_str("\n\tWarming up cache... "))
 
         search_space, r_list, b_list, s_list = self.__get_search_space(data)
         biased_data = data.unsqueeze(0) - b_list.view(-1, 1)
@@ -305,10 +314,10 @@ class sbvr():
                 self.search_cache["bias"].append(best_bias.item())
         self.search_cache["mse"].append(min_mse)
                 
-        print (g_str("Best MSE: ") + f"{min_mse:.4e}" +
-            ", " + y_str("Coeff: ") + str(best_coeff) +
+        print (g_str("\tBest MSE: ") + f"{min_mse:.4e}" +
             ", " + y_str("(r, b, s): ") + f"{best_r:.4e}, " +
-            f"{best_bias.item():.4e}, {best_s:.4e}")
+            f"{best_bias.item():.4e}, {best_s:.4e}" +
+            y_str("\n\t\tCoeff: ") + str(best_coeff.tolist()))
                 
         return best_bias, best_coeff, best_coeff_idx
     
