@@ -89,7 +89,8 @@ class sbvr():
                  min_search_cache_num = 8,
                  max_coeff_search_cache_num = 96,
                  max_bias_search_cache_num = 80,
-                 max_mse_window_size: int = 10,
+                 max_mse_window_size: int = 20,
+                 search_extend_ratio: float = 1.6,
                  coeff_dtype: torch.dtype = None,
                  bin_vec_dtype: torch.dtype = torch.int32,
                  compute_dtype: torch.dtype = torch.float16):
@@ -109,11 +110,14 @@ class sbvr():
         self.original_dtype = data.dtype
         self.original_data_shape = data.shape
         
-        diff_mat_size = 3 * b_search_num * (2**self.num_sums) * \
-            coeff_group_size * torch.tensor(0, dtype=self.compute_dtype, 
-                                   device=data.device).element_size()
+        self.extend_ratio = search_extend_ratio
+        elem_size = torch.tensor(0, dtype=self.compute_dtype, 
+                                 device=data.device).element_size()
+        diff_mat_size = 3 * b_search_num * self.extend_ratio * \
+            (2**self.num_sums) * coeff_group_size * elem_size
+            
         total_mem = torch.cuda.mem_get_info()[0]
-        self.search_batch_size = int(total_mem * 0.85 / diff_mat_size)
+        self.search_batch_size = int(total_mem * 0.9 / diff_mat_size)
         self.min_search_cache_num = min_search_cache_num
         self.max_coeff_search_cache_num = max_coeff_search_cache_num
         self.max_bias_search_cache_num = max_bias_search_cache_num
@@ -132,10 +136,6 @@ class sbvr():
     @torch.inference_mode()
     def __get_all_points(self, coeff_bias: torch.tensor, coeff: torch.tensor):
         num_coeff = coeff.shape[0]
-        # bin_combs = torch.tensor(
-        #     list(itertools.product([0, 1], repeat=num_coeff)),
-        #     dtype=coeff.dtype, device=coeff.device
-        # )
         return self.bin_combs @ coeff + coeff_bias
     
     @torch.inference_mode()
@@ -150,32 +150,43 @@ class sbvr():
         return search_space, r_list, b_list, s_list
     
     @torch.inference_mode()
-    def __get_search_space(self, data):
+    def __get_search_space(self, data, extended=False, extend_ratio=1.4):
         data_max = torch.max(data)
         data_avg = torch.mean(data)
         data_min = torch.min(data)
         data_97 = torch.quantile(data.to(torch.float32), 0.97)
 
-        r_max = math.pi*2/3 + 0.1
-        r_min = 1.0
-        r_gran = (r_max - r_min) / self.r_search_num
-        b_max = data_avg
-        b_min = data_min - (abs(data_min)*0.1)
-        b_gran = (b_max - b_min) / self.b_search_num
-        s_max = (data_max - data_min) * 1.1
-        s_min = (data_97 - data_avg) * 2.0
-        s_gran = (s_max - s_min) / self.s_search_num
-        
+        if not extended:
+            r_max = (math.pi*2/3 + 0.1)
+            r_min = 1.0
+            r_gran = (r_max - r_min) / self.r_search_num
+            b_max = data_avg 
+            b_min = data_min - abs(data_min) * 0.1
+            b_gran = (b_max - b_min) / self.b_search_num
+            s_max = (data_max - data_min) * 1.1
+            s_min = (data_97 - data_avg) * 2.0
+            s_gran = (s_max - s_min) / self.s_search_num
+        else:
+            print (r_str("\tUsing extended search space..."))
+            r_max = (math.pi*2/3 + 0.1)
+            r_min = 1.0
+            r_gran = (r_max - r_min) / (self.r_search_num * extend_ratio)
+            b_max = data_avg + abs(data_avg) * 0.2
+            b_min = data_min - abs(data_min) * 0.2
+            b_gran = (b_max - b_min) / (self.b_search_num * extend_ratio)
+            s_max = (data_max - data_min) * 1.2
+            data_92 = torch.quantile(data.to(torch.float32), 0.92)
+            s_min = (data_92 - data_avg) * 2.0
+            s_gran = (s_max - s_min) / (self.s_search_num * extend_ratio)
+            
         print(b_str("\tNum_sums: ") + f"{self.num_sums}")
-        print(y_str("\t\tR search range: ") + f"{(1.0 + r_gran):.4e} to " + 
-              f"{r_max:.4e}, " +
+        print(y_str("\t\tR search range: ") + f"{r_min:.4e} to {r_max:.4e}, " +
               y_str("search granularity: ") + f"{r_gran:.4e}")
-        print(y_str("\t\tBias search range: ") + f"{data_min:.4e} to " + 
-              f"{data_avg:.4e}, " +
+        print(y_str("\t\tBias search range: ") + 
+              f"{b_min:.4e} to {data_avg:.4e}, " +
               y_str("search granularity: ") + f"{b_gran:.4e}")
         print(y_str("\t\tScale search range: ") + 
-              f"{((data_97 - data_avg*2.0)):.4e} to " +
-              f"{((data_max - data_min)*1.1):.4e}, " +
+              f"{s_min:.4e} to {s_max:.4e}, " +
               y_str("search granularity: ") + f"{s_gran:.4e}")
         
         r_list = torch.arange(r_min + r_gran, r_max + r_gran, r_gran, 
@@ -257,24 +268,31 @@ class sbvr():
             cutoff_mse = sum(mse_window) / len(mse_window)
             if min_mse < cutoff_mse:
                 self.cache_hits += 1
+                coeff_str = ['%.4f' % elem for elem in best_coeff.tolist()]
                 # print (b_str("\nCache Hit ") +
-                #     f"({self.cache_hits / (self.runs):.2f}) - " +
+                #     f"(Hitrate: {self.cache_hits/self.runs:.2f}) - " +
                 #     y_str("Best MSE: ") + f"{min_mse:.4e}" +
                 #     ", " + y_str("Cutoff MSE: ") + f"{cutoff_mse:.4e}" +
-                #     ", " + y_str("Coeff: ") + str(best_coeff.tolist()) +
+                #     ", " + y_str("Coeff: ") + str(coeff_str) +
                 #     ", " + y_str("Bias: ") + f"{best_bias.item():.4e}")
                 return best_bias, best_coeff, best_coeff_idx
             else:
+                coeff_str = ['%.4f' % elem for elem in best_coeff.tolist()]
                 print (r_str("\n\tCache Miss ") +
-                    f"({self.cache_hits / (self.runs):.2f}) - " +
+                    f"(Hitrate: {self.cache_hits/self.runs:.2f}) - " +
                     y_str("Cutoff MSE: ") + f"{cutoff_mse:.4e}" +
                     ", " + y_str("Best MSE: ") + f"{min_mse:.4e}" +
                     ", " + y_str("Bias: ") + f"{best_bias.item():.4e} " +
-                    y_str("\n\t\tCoeff: ") + str(best_coeff.tolist()))
+                    y_str("\n\t\tCoeff: ") + str(coeff_str))
         else:
             print(r_str("\n\tWarming up cache... "))
 
-        search_space, r_list, b_list, s_list = self.__get_search_space(data)
+        use_extended = False
+        if self.cache_hits / self.runs > 0.5:
+            use_extended = True
+        
+        search_space, r_list, b_list, s_list = \
+            self.__get_search_space(data, extended=use_extended)
         biased_data = data.unsqueeze(0) - b_list.view(-1, 1)
         len_search_space = search_space.shape[0]
 
@@ -318,11 +336,11 @@ class sbvr():
             else:
                 self.search_cache["bias"].append(best_bias.item())
         self.search_cache["mse"].append(min_mse)
-                
+        coeff_str = ['%.4f' % elem for elem in best_coeff.tolist()]
         print (g_str("\tBest MSE: ") + f"{min_mse:.4e}" +
             ", " + y_str("(r, b, s): ") + f"{best_r:.4e}, " +
             f"{best_bias.item():.4e}, {best_s:.4e}" +
-            y_str("\n\t\tCoeff: ") + str(best_coeff.tolist()))
+            y_str("\n\t\tCoeff: ") + str(coeff_str))
                 
         return best_bias, best_coeff, best_coeff_idx
     
@@ -384,13 +402,13 @@ class sbvr():
         return info_str
 
 
-def randn_test():
+def randn_test(mat_len=512, sbvr_max_sums=6):
     torch.manual_seed(0)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(0)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    mat_size = (4096, 4096)
+    mat_size = (mat_len, mat_len)
 
     mat_a = torch.randn(mat_size, dtype=torch.float64, device=device)*0.3
     mat_b = torch.randn(mat_size, dtype=torch.float64, device=device)*0.3
@@ -403,24 +421,14 @@ def randn_test():
     mat_c_bf16 = f64_matmul(mat_a.to(torch.bfloat16), mat_b.to(torch.bfloat16))
     mat_c_e4m3fn = f64_matmul(mat_a.to(torch.float8_e4m3fn), mat_b.to(torch.float8_e4m3fn))
     mat_c_e5m2 = f64_matmul(mat_a.to(torch.float8_e5m2), mat_b.to(torch.float8_e5m2))
-    mat_c_sbvr_8 = f64_matmul(sbvr(mat_a, num_sums=8).get_decoded_tensor(), 
-                            sbvr(mat_b, num_sums=8).get_decoded_tensor())
-    mat_c_sbvr_6 = f64_matmul(sbvr(mat_a, num_sums=6).get_decoded_tensor(), 
-                            sbvr(mat_b, num_sums=6).get_decoded_tensor())
-    mat_c_sbvr_4 = f64_matmul(sbvr(mat_a, num_sums=4).get_decoded_tensor(), 
-                            sbvr(mat_b, num_sums=4).get_decoded_tensor())
-    mat_c_sbvr_2 = f64_matmul(sbvr(mat_a, num_sums=2).get_decoded_tensor(), 
-                            sbvr(mat_b, num_sums=2).get_decoded_tensor())
-
-    # print_tensor(mat_c_64, "mat_c")
-    # print_tensor(mat_c_16, "mat_c_16")
-    # print_tensor(mat_c_bf16, "mat_c_bf16")
-    # print_tensor(mat_c_e4m3fn, "mat_c_e4m3fn")
-    # print_tensor(mat_c_e5m2, "mat_c_e5m2")
-    # print_tensor(mat_c_sbvr_8, "mat_c_sbvr_8")
-    # print_tensor(mat_c_sbvr_6, "mat_c_sbvr_6")
-    # print_tensor(mat_c_sbvr_4, "mat_c_sbvr_4")
-    # print_tensor(mat_c_sbvr_2, "mat_c_sbvr_2")
+    time_dict = {}
+    sbvr_dict = {}
+    for i in range (sbvr_max_sums, 1, -1):
+        time_start = time.time()
+        sbvr_matmul = f64_matmul(sbvr(mat_a, num_sums=i).get_decoded_tensor(), 
+                                sbvr(mat_b, num_sums=i).get_decoded_tensor())
+        sbvr_dict[i] = sbvr_matmul
+        time_dict[i] = time.time() - time_start
 
     print(b_str("Case 1: Conversion to float32"))
     print_errors(mat_c_64, mat_c_32)
@@ -432,72 +440,14 @@ def randn_test():
     print_errors(mat_c_64, mat_c_e4m3fn)
     print(b_str("Case 5: Conversion to float8_e5m2"))
     print_errors(mat_c_64, mat_c_e5m2)
-    print(b_str("Case 6: Conversion to sbvr 8 bit"))
-    print_errors(mat_c_64, mat_c_sbvr_8)
-    print(b_str("Case 7: Conversion to sbvr 6 bit"))
-    print_errors(mat_c_64, mat_c_sbvr_6)
-    print(b_str("Case 8: Conversion to sbvr 4 bit"))
-    print_errors(mat_c_64, mat_c_sbvr_4)
-    print(b_str("Case 9: Conversion to sbvr 2 bit"))
-    print_errors(mat_c_64, mat_c_sbvr_2)
-
-
-def test_with_llama3_weight():
-    MODEL_PATH = "meta-llama/Llama-3.2-3B-Instruct"
-    TARGET_LAYER_IDX = 1
-    model, _ = get_llama(MODEL_PATH)
-    ffn_weight = get_layer_ffn_weight(model, TARGET_LAYER_IDX)
-    logger.info(f"ffn_weight shape: {ffn_weight.shape}")
-    logger.info(f"ffn_weight dtype: {ffn_weight.dtype}")
-    logger.info(f"ffn_weight device: {ffn_weight.device}")
-    
-    ext_logger = ExtLogger("llama3_weight_test.txt")
-    
-    def random_fetcher_test(fetch_unit:int = 16, n_fetches:int = 60, weight:torch.Tensor = None):
-        if weight is None:
-            raise ValueError("weight cannot be None")
-        if fetch_unit > weight.shape[0] or fetch_unit > weight.shape[1]:
-            raise ValueError("fetch_unit must be smaller than weight shape")
-        
-        ext_logger.write(f"Fetch Unit: {fetch_unit}")
-        ext_logger.write(f"Number of Fetches: {n_fetches}\n")
-        
-        fetch_r_indices = torch.randint(0, weight.shape[0] - fetch_unit + 1, (n_fetches,), device=weight.device)
-        fetch_c_indices = torch.randint(0, weight.shape[1] - fetch_unit + 1, (n_fetches,), device=weight.device)
-        
-        num_sums_list = [10, 8, 6, 4, 2]
-        for num_sums in num_sums_list:
-            ext_logger.write(f"Num Sums: {num_sums}\n")
-            mse_list = []
-            for i in range(n_fetches):
-                r_start = fetch_r_indices[i]
-                r_end = min(r_start + fetch_unit, weight.shape[0])
-                c_start = fetch_c_indices[i]
-                c_end = min(c_start + fetch_unit, weight.shape[1])
-                weight_fetch = weight[r_start:r_end, c_start:c_end]
-                
-                logger.info(f"shape of weight_fetch: {weight_fetch.shape}")
-                
-                restored_weight_sbvr = sbvr(weight_fetch, num_sums=num_sums).get_decoded_tensor()
-                
-                mse, max_error, min_error, std_dev = get_errors(weight_fetch, restored_weight_sbvr)
-                mse_list.append(mse)
-                log_text = (
-                    f"Fetch {i + 1}/{n_fetches} (num_sums={num_sums}): "
-                    f"MSE: {mse:.8e}, "
-                    f"Max Error: {max_error:.4e}, "
-                    f"Min Error: {min_error:.4e}, "
-                    f"Std Dev: {std_dev:.4e}"
-                )
-                ext_logger.write(log_text + "\n")
-            ext_logger.write(f"Average mse: {sum(mse_list)/len(mse_list):.8e}")
-            ext_logger.write("\n")
-            
-    random_fetcher_test(fetch_unit=16, n_fetches=60, weight=ffn_weight)
-    logger.info("Test completed. Check the log file for details.")
+    for i, (key, value) in enumerate(sbvr_dict.items()):
+        print(b_str(f"Case {i+6}: Conversion to SBVR {key} bits"))
+        print_errors(mat_c_64, value)
+        print(y_str("\tTime taken: ") + f"{time_dict[key]:.4f} seconds")
     
 if __name__ == "__main__":
+    mat_len = sys.argv[1]
+    sbvr_max_sums = sys.argv[2]
     time_start = time.time()
-    randn_test()
-    print (f"Time taken: {time.time() - time_start:.4f} seconds")
-    # test_with_llama3_weight()
+    randn_test(int(mat_len), int(sbvr_max_sums))
+    print (f"Total time taken: {time.time() - time_start:.4f} seconds")
