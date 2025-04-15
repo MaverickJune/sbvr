@@ -93,7 +93,7 @@ class sbvr():
         self.max_coeff_search_cache_num = max_coeff_search_cache_num
         self.max_bias_search_cache_num = max_bias_search_cache_num
         self.max_mse_window_size = max_mse_window_size
-        self.acceptable_mse = 10**-9
+        self.acceptable_mse = 10**-12
         self.search_cache = {"coeff": [], "bias": [], "mse": []}
         self.cache_hits = 0
         self.runs = 0
