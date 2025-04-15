@@ -1,0 +1,50 @@
+import numpy as np
+import torch
+from datasets import load_dataset
+import random
+from tqdm import tqdm
+
+from sbvr_utils.log_config import get_logger, ExtLogger
+logger = get_logger(__name__)
+
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.random.manual_seed(seed)
+    
+ 
+@torch.no_grad()   
+def eval_ppl(model=None, tokenizer=None, dataset="wikitext-2", seqlen=256, n_samples=-1):
+    """
+    Evaluate the perplexity of the model on a dataset.
+    
+    @param model: The model to evaluate.
+    @param dataset: The dataset to evaluate on.
+    @param seqlen: The sequence length for evaluation.
+    @param n_samples: The number of samples to evaluate.
+    """
+    SUPPORTED_DATASETS = ["wikitext-2"]
+    if dataset not in SUPPORTED_DATASETS:
+        raise ValueError(f"Dataset {dataset} is not supported. Supported datasets are: {SUPPORTED_DATASETS}")
+    if None in (model, tokenizer):
+        raise ValueError("model and tokenizer cannot be None")
+    
+    model.eval()
+    
+    if dataset == "wikitext-2":
+        testdata = load_dataset("wikitext", "wikitext-2-raw-v1", split="test[:20%]")
+        testenc = tokenizer("\n\n".join(testdata["text"]), return_tensors="pt").input_ids
+        logger.info(f"Size of test data: {testenc.numel() * testenc.element_size() / 1024 / 1024 / 1024:.3f} GB")
+        
+        max_samples = testenc.numel() // seqlen
+        testenc = testenc[0, :(seqlen * max_samples)].view(max_samples, -1)
+        if n_samples != -1:
+            testenc = testenc[:n_samples]
+        else:
+            n_samples = max_samples
+        logger.info(f"Number of samples: {n_samples}")
+        
+    else:
+        raise NotImplementedError(f"Dataset {dataset} is not implemented for now")
+    
