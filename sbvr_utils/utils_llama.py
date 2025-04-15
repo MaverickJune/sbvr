@@ -21,7 +21,7 @@ def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="met
         logger.info("Using SBVR Llama model")
         model = SBVRLlamaForCausalLM.from_pretrained(
             model_path,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.bfloat16,
             device_map=device_map
         )
     elif use_llm_int8:
@@ -34,7 +34,7 @@ def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="met
             device_map=device_map,
             quantization_config=quantization_config
         )
-    elif use_fp8:
+    elif use_fp8: # Only works in hopper GPU (compute capability 9.0 and above)
         logger.info("Using Llama model with FP8")
         fp8_config = FineGrainedFP8Config()
         model = LlamaForCausalLM.from_pretrained(
@@ -43,10 +43,10 @@ def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="met
             device_map=device_map,
             quantization_config=fp8_config
         )
-    else:
+    else: 
         model = LlamaForCausalLM.from_pretrained(
             model_path,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.bfloat16,
             device_map=device_map
         )
     model.eval()

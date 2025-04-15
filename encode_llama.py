@@ -36,7 +36,7 @@ def process_single_decoder_layer(layer_idx, target_layer, curr_device, num_sums=
         save_dict = {
             "coeff": sbvr_compressed_weight.coeff,
             "coeff_bias": sbvr_compressed_weight.coeff_bias,
-            "coeff_idx": sbvr_compressed_weight.coeff_idx,
+            "coeff_idx": sbvr_compressed_weight.bvr,
         }
         torch.save(save_dict, weight_path)
         logger.info(f"Saved {weight_name} weight to {weight_path}")
@@ -100,7 +100,7 @@ def process_sbvr_llama_multi_gpu(model, num_sums=4, save_path="compressed_weight
 
 
 if __name__ == "__main__":
-    MODEL_PATH = "meta-llama/Llama-3.1-8B-Instruct"
+    MODEL_PATH = "meta-llama/Llama-3.2-3B"
     NUM_SUMS = 4
     SAVE_PATH = "compressed_weights"
     

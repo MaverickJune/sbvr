@@ -20,7 +20,7 @@ def measure_llama_ppl(model_path, use_sbvr=False, use_llm_int8=False, use_fp8=Fa
 if __name__ == "__main__":
     MODEL_PATH = "meta-llama/Llama-3.2-3B"
     
-    # measure_llama_ppl(model_path=MODEL_PATH)
+    measure_llama_ppl(model_path=MODEL_PATH)
     # measure_llama_ppl(model_path=MODEL_PATH, use_llm_int8=True)
-    measure_llama_ppl(model_path=MODEL_PATH, use_fp8=True)
+    # measure_llama_ppl(model_path=MODEL_PATH, use_fp8=True)
     
