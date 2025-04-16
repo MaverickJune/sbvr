@@ -2,3 +2,6 @@ uv_sbvr
 logs/
 __pycache__/
 compressed_weights/
+sbvr_weight.zip
+result.txt
+dummy/

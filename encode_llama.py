@@ -4,7 +4,7 @@ from sbvr_utils.utils_llama import get_llama
 import torch
 import torch.nn as nn
 import torch.multiprocessing as mp
-from sbvr_grouped import sbvr 
+from sbvr import sbvr 
 import os
 
 from sbvr_utils.log_config import get_logger
@@ -36,7 +36,8 @@ def process_single_decoder_layer(layer_idx, target_layer, curr_device, num_sums=
         save_dict = {
             "coeff": sbvr_compressed_weight.coeff,
             "coeff_bias": sbvr_compressed_weight.coeff_bias,
-            "coeff_idx": sbvr_compressed_weight.coeff_idx,
+            "bvr": sbvr_compressed_weight.bvr, # coeff_idx -> bvr
+            "bvr_dtype": sbvr_compressed_weight.bvr_dtype, # added
         }
         torch.save(save_dict, weight_path)
         logger.info(f"Saved {weight_name} weight to {weight_path}")
@@ -51,7 +52,8 @@ def process_lm_head(lm_head, num_sums=4, curr_device=0, save_path=None):
     save_dict = {
         "coeff": sbvr_compressed_weight.coeff,
         "coeff_bias": sbvr_compressed_weight.coeff_bias,
-        "coeff_idx": sbvr_compressed_weight.coeff_idx,
+        "bvr": sbvr_compressed_weight.bvr,
+        "bvr_dtype": sbvr_compressed_weight.bvr_dtype,
     }
     torch.save(save_dict, weight_path)
     logger.info(f"Saved lm_head weight to {weight_path}")
@@ -75,6 +77,9 @@ def process_sbvr_llama_multi_gpu(model, num_sums=4, save_path="compressed_weight
     
     curr_device = 0
     proc_list = [None for _ in range(n_gpus)]
+
+    # process_lm_head(model.lm_head.cpu(), num_sums, curr_device, save_path)
+    # return
     
     logger.info(f"Processing {n_layers} layers across {n_gpus} GPUs")
     
@@ -100,7 +105,7 @@ def process_sbvr_llama_multi_gpu(model, num_sums=4, save_path="compressed_weight
 
 
 if __name__ == "__main__":
-    MODEL_PATH = "meta-llama/Llama-3.1-8B-Instruct"
+    MODEL_PATH = "meta-llama/Llama-3.2-3B"
     NUM_SUMS = 4
     SAVE_PATH = "compressed_weights"
     
