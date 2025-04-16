@@ -66,8 +66,8 @@ def sbvr_randn_test(mat_len=512, sbvr_max_sums=6):
     sbvr_dict = {}
     for i in range (sbvr_max_sums, 1, -2):
         time_start = time.time()
-        sbvr_matmul = f64_matmul(sbvr.sbvr(mat_a, num_sums=i).get_decoded_tensor(), 
-                                 sbvr.sbvr(mat_b, num_sums=i).get_decoded_tensor())
+        sbvr_matmul = f64_matmul(sbvr.sbvr(mat_a, num_sums=i).decode(), 
+                                 sbvr.sbvr(mat_b, num_sums=i).decode())
         sbvr_dict[i] = sbvr_matmul
         time_dict[i] = time.time() - time_start
 
@@ -87,15 +87,26 @@ def sbvr_randn_test(mat_len=512, sbvr_max_sums=6):
         print_errors(mat_c_64, value)
         print(y_str("\tTime taken: ") + f"{time_dict[key]:.4f} seconds")
         
-def sbvr_mat_vec_mult_test():
+def sbvr_mat_mat_mult_test(mat_len=512, sbvr_max_sums=6):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    vec_a = torch.randn((8), dtype=torch.float32, device=device)*0.3
-    vec_b = torch.randn((8), dtype=torch.float32, device=device)*0.3
-    sbvr_vec_a = sbvr.sbvr(vec_a, num_sums=4)
-    print_tensor(vec_a, "vec_a")
-    print_tensor(vec_b, "vec_b")
-    vec_a_b = sbvr_vec_a.cuda_matrix_vec_mul(vec_a, vec_b)
-    print_tensor(vec_a_b, "vec_a_b")
+    mat_a = torch.randn((1, mat_len), dtype=torch.float64, device=device)*0.3
+    mat_b = torch.randn((mat_len, mat_len), 
+                        dtype=torch.float64, device=device)*0.3
+    print_tensor(mat_a, "mat_a")
+    print_tensor(mat_b, "mat_b")
+    
+    mat_mat_ab = mat_a @ mat_b.T
+    print_tensor(mat_mat_ab, "mat_mat_ab")
+    
+    sbvr_mat_a = sbvr.sbvr(mat_a, num_sums=sbvr_max_sums)
+    sbvr_mat_b = sbvr.sbvr(mat_b, num_sums=sbvr_max_sums)
+    print_tensor(sbvr_mat_a.decode(), "sbvr_mat_a")
+    print_tensor(sbvr_mat_b.decode(), "sbvr_mat_b")
+    sbvr_decoded_mat_mat_ab = sbvr_mat_a.decode() @ sbvr_mat_b.decode().T
+    print_tensor(sbvr_decoded_mat_mat_ab, "sbvr_decoded_mat_mat_ab")
+    
+    sbvr_cuda_mat_mat_ab = sbvr_mat_a.cuda_mat_mat_t_mul(sbvr_mat_b)
+    print_tensor(sbvr_cuda_mat_mat_ab, "sbvr_cuda_mat_mat_ab")
 
 if __name__ == "__main__":
     torch.manual_seed(0)
@@ -104,8 +115,9 @@ if __name__ == "__main__":
         
     mat_len = sys.argv[1]
     sbvr_max_sums = sys.argv[2]
+    
     # time_start = time.time()
     # sbvr_randn_test(int(mat_len), int(sbvr_max_sums))
     # print (f"Total time taken: {time.time() - time_start:.4f} seconds")
     
-    sbvr_mat_vec_mult_test()
+    sbvr_mat_mat_mult_test(int(mat_len), int(sbvr_max_sums))
