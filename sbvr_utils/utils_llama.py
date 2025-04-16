@@ -5,6 +5,12 @@ import torch
 from sbvr_utils.log_config import get_logger
 logger = get_logger(__name__)
 
+
+@torch.inference_mode
+def decompress_sbvr_llama(weight_path=None, model=None):
+    pass
+
+
 @torch.no_grad()
 def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="meta-llama/Llama-3.2-3B-Instruct", 
               device_map:str ="auto", use_sbvr:bool = False, use_llm_int8:bool = False, use_fp8:bool = False):

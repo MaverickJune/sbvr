@@ -75,6 +75,9 @@ def process_sbvr_llama_multi_gpu(model, num_sums=4, save_path="compressed_weight
     
     curr_device = 0
     proc_list = [None for _ in range(n_gpus)]
+
+    # process_lm_head(model.lm_head.cpu(), num_sums, curr_device, save_path)
+    # return
     
     logger.info(f"Processing {n_layers} layers across {n_gpus} GPUs")
     
