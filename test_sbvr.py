@@ -132,6 +132,19 @@ def sbvr_mat_mat_mult_test(mat_len=512, sbvr_max_sums=6, do_print = False):
     print_errors(sbvr_decoded_mat_mat_ab, mat_mat_ab)
     print(b_str("Case 3: Full precision vs SBVR CUDA"))
     print_errors(mat_mat_ab, sbvr_cuda_mat_mat_ab)
+    
+def sbvr_store_and_load_test(mat_len=512, sbvr_max_sums=6):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    mat_size = (mat_len, mat_len)
+
+    target_matrix = torch.randn(mat_size, dtype=torch.float64, device=device)*0.3
+    sbvr_matrix = sbvr.sbvr(target_matrix, num_sums=sbvr_max_sums)
+    sbvr.save_sbvr(sbvr_matrix, f"sbvr_matrix_{mat_len}.pt")
+    load_sbvr_matrix = sbvr.load_sbvr(f"sbvr_matrix_{mat_len}.pt", device=device)
+    target_matrix_decoded = sbvr_matrix.decode()
+    
+    print_errors(target_matrix, target_matrix_decoded)
+    
 
 if __name__ == "__main__":
     torch.manual_seed(0)
@@ -142,7 +155,8 @@ if __name__ == "__main__":
     sbvr_max_sums = sys.argv[2]
     
     time_start = time.time()
-    sbvr_randn_test(int(mat_len), int(sbvr_max_sums))
+    # sbvr_randn_test(int(mat_len), int(sbvr_max_sums))
+    sbvr_store_and_load_test(int(mat_len), int(sbvr_max_sums))
     print (f"Total time taken: {time.time() - time_start:.4f} seconds")
     
     # sbvr_mat_mat_mult_test(int(mat_len), int(sbvr_max_sums))

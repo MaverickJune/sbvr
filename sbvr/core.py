@@ -27,9 +27,9 @@ class sbvr():
                  mse_window_size: int = 20,
                  search_extend_ratio: float = 1.2,
                  compute_dtype: torch.dtype = torch.float16,
-                 load_only: bool = False,
+                 decode_only: bool = False,
                  **kwargs):
-        if load_only:
+        if decode_only:
             def load_from_kwargs(self, **kwargs):
                 for key, value in kwargs.items():
                     setattr(self, key, value)
@@ -494,6 +494,10 @@ class sbvr():
         return info_str
     
 def save_sbvr(sbvr_obj, filename):
+    '''
+    Some dtypes(uint16, 32) cannot be pickled for torch.save, so we need to convert them
+    to a compatible dtype before saving
+    '''
     if not isinstance(sbvr_obj, sbvr):
         raise ValueError("The object is not a valid SBVR object.")
     save_dict = {
@@ -508,12 +512,19 @@ def save_sbvr(sbvr_obj, filename):
         "compute_dtype": sbvr_obj.compute_dtype,
         
         "coeff_cache": sbvr_obj.coeff_cache,
-        "coeff_idx": sbvr_obj.coeff_idx,
-        "bvr": sbvr_obj.bvr,
+        "coeff_idx": sbvr_obj.coeff_idx.to(torch.int32),
+        "bvr": sbvr_obj.bvr.to(torch.int64),
     }
     torch.save(save_dict, filename)
-        
-def load_sbvr(filename) -> sbvr:
+
+def load_sbvr(filename, device=None) -> sbvr:
+    if device is None:
+        raise ValueError("Device cannot be None")
     save_dict = torch.load(filename)
-    sbvr_obj = sbvr(load_only=True, **save_dict)
+    for k, v in save_dict.items():
+        if isinstance(v, torch.Tensor):
+            save_dict[k] = v.to(device)
+    save_dict["coeff_idx"] = save_dict["coeff_idx"].to(torch.uint16)
+    save_dict["bvr"] = save_dict["bvr"].to(torch.uint32)
+    sbvr_obj = sbvr(decode_only=True, **save_dict)
     return sbvr_obj
