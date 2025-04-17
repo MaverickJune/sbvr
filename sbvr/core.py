@@ -22,12 +22,12 @@ class sbvr():
     def __init__(self, 
                  data: torch.Tensor = None, 
                  num_sums: int = 4,
-                 use_bias: bool = False,
+                 use_bias: bool = True,
                  verbose_level: int = 1,
                  cgroup_len: int = 128,
-                 r_search_num = 128,
-                 s_search_num = 64,
-                 b_search_num = 64,
+                 r_search_num = 80,
+                 s_search_num = 48,
+                 b_search_num = 48,
                  cache_warmup_num = 8,
                  mse_window_size: int = 20,
                  search_extend_ratio: float = 1.25,
@@ -62,8 +62,8 @@ class sbvr():
         # Memory settings
         self.extend_ratio = search_extend_ratio
         elem_size = torch.tensor(0, dtype=self.compute_dtype).element_size()
-        diff_mat_size = 3 * b_search_num * self.extend_ratio * \
-            (2**self.num_sums) * cgroup_len * elem_size
+        diff_mat_size = 3 * self.extend_ratio * (2**self.num_sums) \
+            * cgroup_len * elem_size
         total_mem = torch.cuda.mem_get_info(data.device)[0]
         self.search_batch_size = int(total_mem * 0.8 / diff_mat_size)
         
@@ -131,6 +131,7 @@ class sbvr():
         search_space = \
             search_space / torch.sum(search_space, dim=1).unsqueeze(1)
         search_space = s_list.view(-1, 1, 1) * search_space.unsqueeze(0)
+        search_space = b_list.view(-1, 1, 1, 1) + search_space.unsqueeze(0)
         search_space = search_space.view(-1, self.num_sums)
 
         return search_space, r_list, b_list, s_list
@@ -147,7 +148,7 @@ class sbvr():
             r_min = 1.0
             r_gran = (r_max - r_min) / self.r_search_num 
             b_max = data_avg
-            b_min = data_min - abs(data_min) * 0.1
+            b_min = 0.0
             b_gran = (b_max - b_min) / self.b_search_num 
             s_max = (data_max - data_min) * 1.1 
             s_min = (data_97 - data_avg) * 2.0
@@ -159,8 +160,8 @@ class sbvr():
             r_max = (math.pi*2/3 + 0.1)
             r_min = 1.0
             r_gran = (r_max - r_min) / (self.r_search_num * extend_ratio) 
-            b_max = data_avg + abs(data_avg) * 0.2
-            b_min = data_min - abs(data_min) * 0.2
+            b_max = data_avg 
+            b_min = 0.0
             b_gran = (b_max - b_min) / (self.b_search_num * extend_ratio) 
             s_max = (data_max - data_min) * 1.2
             data_92 = torch.quantile(data.to(torch.float32), 0.92)
@@ -182,7 +183,7 @@ class sbvr():
                 f"{s_min:.4e} to {s_max:.4e}, " +
                 y_str("search granularity: ") + f"{s_gran:.4e}")
         
-        r_list = torch.arange(r_min + r_gran, r_max + r_gran, r_gran, 
+        r_list = -torch.arange(r_min + r_gran, r_max + r_gran, r_gran, 
                               device=data.device, dtype=data.dtype)
         if s_gran != 0:
             s_list = torch.arange(s_min + s_gran, s_max + s_gran, s_gran, 
@@ -190,16 +191,14 @@ class sbvr():
         else:
             s_list = torch.tensor([s_min], device=data.device, dtype=data.dtype)
         if b_gran != 0:
-            b_list = torch.arange(b_min + b_gran, b_max + b_gran, b_gran, 
+            b_list = torch.arange(b_min, b_max, b_gran, 
                                   device=data.device, dtype=data.dtype)
         else:
             b_list = torch.tensor([b_min], device=data.device, dtype=data.dtype)
-        if not self.use_bias:
-            r_list = -r_list
-            b_list = torch.tensor([0], device=data.device, dtype=data.dtype)
-            self.bias_cache = torch.zeros((1),
-                dtype=self.compute_dtype, device=data.device)
-            self.num_bias_cache_lines = 1
+
+        self.bias_cache = torch.zeros((1),
+            dtype=self.compute_dtype, device=data.device)
+        self.num_bias_cache_lines = 1
         
         return self._get_coeff_search_space_from_lists(r_list, b_list, s_list)
     
@@ -312,8 +311,7 @@ class sbvr():
                 self._get_coeff_search_space(data, 
                                             (self.cache_hits/self.group_idx) 
                                                 > 0.6)
-            if self.check_bias_cache_full():
-                b_list = self.bias_cache[:self.num_bias_cache_lines]  
+            b_list = self.bias_cache[:self.num_bias_cache_lines]  
                 
             biased_data = data.unsqueeze(0) - b_list.view(-1, 1)
             
@@ -364,8 +362,8 @@ class sbvr():
                 best_coeff_str = ['%.4f' % elem for elem in \
                     self.coeff_cache[best_coeff_idx].tolist()]
                 best_bias = self.bias_cache[best_bias_idx].item()
-                best_r = r_list[new_coeff_idx % len(r_list)]
-                best_s = s_list[new_coeff_idx // len(r_list)]   
+                # best_r = r_list[new_coeff_idx % len(r_list)]
+                # best_s = s_list[new_coeff_idx // len(r_list)]   
                 self.mse_history.append(min_mse)
                 
         if self.verbose_level > 0:
