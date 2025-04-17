@@ -21,5 +21,5 @@ setup(
         ),
     ],
     cmdclass={'build_ext': BuildExtension},
-    install_requires=requirements
+    # install_requires=requirements
 )
