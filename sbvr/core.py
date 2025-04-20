@@ -136,7 +136,7 @@ class _sbvr_serialized():
         
     def _serialize_tensor(self, tensor: torch.Tensor) -> bytes:
         raw_bytes = tensor.detach().cpu().numpy().tobytes()
-        nd_array = np.frombuffer(raw_bytes, dtype=np.int32)
+        nd_array = np.frombuffer(raw_bytes, dtype=np.int8).copy()
         torch_tensor = torch.from_numpy(nd_array)
         return torch_tensor
     
