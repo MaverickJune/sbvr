@@ -1,7 +1,7 @@
 import torch
 import itertools
 import math
-import copy
+import json
 import numpy as np
 from tqdm import tqdm
 from sbvr.sbvr_cuda import sbvr_mm_T
@@ -102,7 +102,9 @@ class _sbvr_serialized():
                 _r_str("The BVR inner dimension does not match the padded "+
                       f"data shape, expected {self.padded_data_shape[-1]} " +
                       f"but got {bvr_inner * bvr_num_bits}"))
-        self.bvr = self._serialize_tensor(bvr.detach())
+        self.bvr = self._serialize_tensor(bvr)
+        self.bvr_shape = bvr.shape
+        self.bvr_dtype = bvr.dtype
         
         if coeff_cache.shape[0] <= 256:
             if coeff_idx.dtype != torch.uint8:
@@ -119,25 +121,28 @@ class _sbvr_serialized():
             raise ValueError(
                 _r_str("Unsupported number of cache lines, " +
                         f"{coeff_cache.shape[0]}"))
-
-        self.coeff_idx = self._serialize_tensor(coeff_idx.detach())
-            
+        self.coeff_idx = self._serialize_tensor(coeff_idx)
+        self.coeff_idx_shape = coeff_idx.shape
+        self.coeff_idx_dtype = coeff_idx.dtype
+        
         if coeff_cache.dtype != self.compute_dtype:
             raise ValueError(
                 _r_str("The coefficient cache data type does not match - "
                         f"expected type {self.compute_dtype} but got " +
                         f"{coeff_cache.dtype}"))
-        self.coeff_cache = self._serialize_tensor(coeff_cache.detach())
+        self.coeff_cache = self._serialize_tensor(coeff_cache)
+        self.coeff_cache_shape = coeff_cache.shape
+        self.coeff_cache_dtype = coeff_cache.dtype
         
-    
     def _serialize_tensor(self, tensor: torch.Tensor) -> bytes:
-        return {
-            "data": tensor.cpu().numpy().tobytes(),
-            "shape": tensor.shape,
-            "dtype": tensor.dtype
-        }
+        raw_bytes = tensor.detach().cpu().numpy().tobytes()
+        nd_array = np.frombuffer(raw_bytes, dtype=np.int32)
+        torch_tensor = torch.from_numpy(nd_array)
+        return torch_tensor
     
-    def _deserialize_tensor(self, serialized_tensor: bytes) -> torch.Tensor:
+    def _deserialize_tensor(self, serialized_data: torch.Tensor,
+                            shape, dtype) -> torch.Tensor:
+        serialized_data = serialized_data.detach().cpu().numpy()
         dtype_map = {
             "torch.uint8": np.uint8,
             "torch.uint16": np.uint16,
@@ -146,20 +151,22 @@ class _sbvr_serialized():
             "torch.float16": np.float16,
             "torch.float32": np.float32,
         }
-        dtype_str = str(serialized_tensor["dtype"])
-        np_dtype = dtype_map.get(dtype_str, None)
+        np_dtype = dtype_map.get(str(dtype), None)
         if np_dtype is None:
-            raise ValueError(f"Unsupported dtype: {dtype_str}")
-        shape = serialized_tensor["shape"]
+            raise ValueError(f"Unsupported dtype: {dtype}")
         array = \
-            np.frombuffer(serialized_tensor["data"], 
+            np.frombuffer(serialized_data, 
                           dtype=np_dtype).reshape(shape).copy()
-        return torch.from_numpy(array).to(serialized_tensor["dtype"])
+        return torch.from_numpy(array).to(dtype=dtype).contiguous()
     
     def deserialize_sbvr(self):
-        bvr = self._deserialize_tensor(self.bvr)
-        coeff_idx = self._deserialize_tensor(self.coeff_idx)
-        coeff_cache = self._deserialize_tensor(self.coeff_cache)
+        bvr = self._deserialize_tensor(self.bvr, self.bvr_shape, self.bvr_dtype)
+        coeff_idx = self._deserialize_tensor(self.coeff_idx, 
+                                             self.coeff_idx_shape, 
+                                             self.coeff_idx_dtype)
+        coeff_cache = self._deserialize_tensor(self.coeff_cache, 
+                                               self.coeff_cache_shape, 
+                                               self.coeff_cache_dtype)
         return self.num_sums, self.cgroup_len, self.compute_dtype, \
             self.bvr_dtype, self.original_dtype, self.original_data_shape, \
             bvr, coeff_idx, coeff_cache
