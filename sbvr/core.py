@@ -657,7 +657,7 @@ class sbvr(torch.nn.Module):
     @torch.inference_mode()
     def save(self, filename):   
         if self.verbose_level > 0:
-            print(_b_str("Saving SBVR object..."))
+            print(_b_str("Saving SBVR object to: ") + filename)
             print(self.get_sbvr_info()) 
         serialized_sbvr = self._serialize()
         torch.save(serialized_sbvr, filename)
@@ -763,6 +763,6 @@ def load(filename, device=None, verbose=1) -> sbvr:
                     verbose_level=verbose, device=device)
     sbvr_obj.verbose_level = verbose
     if verbose > 0:
-        print(_b_str("Loaded SBVR object:"))
+        print(_b_str("Loaded SBVR object from: ") + filename)
         print(sbvr_obj.get_sbvr_info())
     return sbvr_obj
