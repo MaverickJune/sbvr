@@ -517,9 +517,8 @@ class sbvr(torch.nn.Module):
             enc_conf.search_batch_size = 1024
 
         # Pad the data to the nearest multiple of cgroup_len
-        padded_data_shape = self._get_padded_data_shape()
-        if self.original_data_shape != padded_data_shape:
-            data_padded = torch.zeros(padded_data_shape, 
+        if self.original_data_shape != self._get_padded_data_shape():
+            data_padded = torch.zeros(self._get_padded_data_shape(), 
                                       dtype=data.dtype, device=data.device)
             slices = tuple(slice(0, s) for s in data.shape)
             data_padded[slices] = data
@@ -585,21 +584,15 @@ class sbvr(torch.nn.Module):
             
     @torch.inference_mode()
     def _change_coeff_sel_to_bvr(self, coeff_sel):
-        coeff_sel_len = self.padded_data_shape.numel()
+        coeff_sel_len = self._get_padded_data_shape().numel()
         num_bits = self._get_bvr_num_bits()
-        padded_len = (coeff_sel_len + num_bits - 1) // num_bits * num_bits
-        bvr = torch.zeros((self.num_sums, (padded_len // num_bits)),
+        bvr = torch.zeros((self.num_sums, (coeff_sel_len // num_bits)),
                 dtype=self.bvr_dtype, device=self.coeff_cache.device)
-        
         powers = 2 ** torch.arange(num_bits, dtype=torch.int64, 
                                    device=self.coeff_cache.device)
-        coeff_sel = torch.cat((coeff_sel, 
-                               torch.zeros(padded_len - coeff_sel_len,
-                                           dtype=coeff_sel.dtype,
-                                           device=coeff_sel.device)))
         iter_size = 65536
-        for i in range(0, padded_len, iter_size):
-            max_i = min(i + iter_size, padded_len)
+        for i in range(0, coeff_sel_len, iter_size):
+            max_i = min(i + iter_size, coeff_sel_len)
             coeff_sel_i = coeff_sel[i:max_i]
             bin_vec = self._dec2bin(coeff_sel_i, self.num_sums).to(torch.int64)
             bin_vec = \
@@ -608,34 +601,44 @@ class sbvr(torch.nn.Module):
             bvr[:, i//32:max_i//32] = bvr_i
             
         bvr_per_cgroup = self.cgroup_len // self._get_bvr_num_bits()
-        cgroup_per_inner_vec = self.padded_data_shape[-1] // self.cgroup_len
-        bvr = bvr.view(self.num_sums, -1, cgroup_per_inner_vec,
-                                 bvr_per_cgroup)
-        return bvr.transpose(0, 1).contiguous()
+        cgroup_per_inner_vec = \
+            self._get_padded_data_shape()[-1] // self.cgroup_len
+        bvr = bvr.view(self.num_sums, -1, cgroup_per_inner_vec, bvr_per_cgroup)
+        bvr_padded_rows = (bvr.shape[1] + 4 - 1) // 4 * 4
+        bvr_padded = torch.zeros((self.num_sums, bvr_padded_rows,
+                                 cgroup_per_inner_vec, bvr_per_cgroup),
+                                 dtype=self.bvr_dtype,
+                                 device=self.coeff_cache.device)
+        bvr_padded[:, :bvr.shape[1], :] = bvr
+        bvr_padded = bvr_padded.view(self.num_sums, bvr_padded_rows // 4,
+                                     4, cgroup_per_inner_vec, bvr_per_cgroup)
+        bvr_padded = bvr_padded.permute(1, 0, 3, 2, 4).contiguous()
+        return bvr_padded
      
     @torch.inference_mode()
     def _change_bvr_to_coeff_sel(self):
-        coeff_sel_len = self.padded_data_shape.numel()
-        bvr = self.bvr.transpose(0, 1).contiguous().view(self.num_sums, -1)
+        coeff_sel_len = self._get_padded_data_shape().numel()
+        bvr = self.bvr.permute(1, 0, 3, 2, 4).contiguous()
+        bvr = bvr.view(self.num_sums, -1)
         num_bits = self._get_bvr_num_bits()
         powers = 2 ** torch.arange(num_bits, 
                                    dtype=torch.int64, 
                                    device=self.coeff_cache.device)
-        coeff_sel = torch.empty((coeff_sel_len),
+        coeff_sel = torch.empty((bvr.shape[1] * num_bits),
                                dtype=torch.int32, 
                                device=self.coeff_cache.device)
         iter_size = 2048
         for i in range(0, bvr.shape[1], iter_size):
-            max_i = min(i + iter_size, coeff_sel_len)
+            max_i = min(i + iter_size, bvr.shape[1])
             bvr_i = bvr[:, i:max_i].to(torch.int64)
             bin_vec = ((bvr_i.unsqueeze(-1) & powers) != 0).to(torch.int32)
             bin_vec = bin_vec.view(self.num_sums, -1)
-            max_coeff_i = min(max_i*num_bits, coeff_sel_len)
+            max_coeff_i = min(max_i*num_bits, coeff_sel.shape[0])
             bin_vec_trunc = bin_vec[:, :max_coeff_i].transpose(0, 1)
             coeff_sel_i = self._bin2dec(bin_vec_trunc, self.num_sums)
             coeff_sel[i*num_bits:max_coeff_i] = coeff_sel_i.view(-1)
 
-        return coeff_sel
+        return coeff_sel[:coeff_sel_len]
     
     @torch.inference_mode()
     def _serialize(self):
@@ -677,7 +680,7 @@ class sbvr(torch.nn.Module):
             decoded_tensor.flatten()[group_start:group_end] = group_data
             
         # Truncate the tensor to the original shape
-        if self.original_data_shape != self.padded_data_shape:
+        if self.original_data_shape != self._get_padded_data_shape():
             slices = tuple(slice(0, s) for s in self.original_data_shape)
             decoded_tensor = decoded_tensor[slices]
         
@@ -709,22 +712,31 @@ def mm_T(lhs: sbvr, rhs: sbvr, bias: torch.Tensor = None) -> torch.Tensor:
         raise ValueError(_r_str("Incompatible SBVR coeff group len: ") +
                             f"LHS SBVR group length: {lhs.cgroup_len}, "
                             f"RHS SBVR group length: {rhs.cgroup_len}")
-    if lhs.padded_data_shape[1] != rhs.padded_data_shape[1]:
+    if lhs._get_padded_data_shape()[1] != rhs._get_padded_data_shape()[1]:
         raise ValueError(_r_str("Incompatible matrix and vector shapes: ") +
                             f"LHS SBVR shape: {lhs.original_data_shape}, "
                             f"RHS SBVR shape: {rhs.original_data_shape}")
+    if bias is not None and bias.shape != (rhs._get_padded_data_shape()[0],):
+        raise ValueError("Bias must be a 1D tensor with same outer dim as rhs")    
+    
     if lhs.compute_dtype != torch.float16 or \
-            rhs.compute_dtype != torch.float16:
-        raise ValueError(_r_str("Incompatible SBVR compute data types: ") +
-                            f"LHS SBVR dtype: {lhs.compute_dtype}, "
-                            f"RHS SBVR dtype: {rhs.compute_dtype}")
-    if lhs.bvr_dtype != torch.uint32 or rhs.bvr_dtype != torch.uint32:
-        raise ValueError(_r_str("Incompatible SBVR vector data types: ") +
-                            f"LHS BVR dtype: {lhs.bvr_dtype}, "
-                            f"RHS BVR dtype: {rhs.bvr_dtype}")
-    if bias is not None and bias.shape != (rhs.padded_data_shape[0],):
-        raise ValueError("Bias must be a 1D tensor with same outer dim as rhs")
-
+        rhs.compute_dtype != torch.float16 or \
+        lhs.bvr_dtype != torch.uint32 or \
+        rhs.bvr_dtype != torch.uint32 or \
+        lhs.cgroup_len != 128 or \
+        rhs.cgroup_len != 128:
+            print(_r_str("Warning: SBVR objects are not using the default " +
+                        "parameters. Using unoptimized SBVR MM_T.") +
+                _y_str("lhs compute dtype: ") + f"{lhs.compute_dtype}, " +
+                _y_str("rhs compute dtype: ") + f"{rhs.compute_dtype}, " +
+                _y_str("lhs bvr dtype: ") + f"{lhs.bvr_dtype}, " +
+                _y_str("rhs bvr dtype: ") + f"{rhs.bvr_dtype}, " +
+                _y_str("lhs cgroup len: ") + f"{lhs.cgroup_len}, " +
+                _y_str("rhs cgroup len: ") + f"{rhs.cgroup_len}")
+            mm = lhs.decode() @ rhs.decode().T 
+            if bias is not None:
+                mm += bias
+            return mm
 
     l_bvr = lhs.bvr
     l_coeff_idx = lhs.coeff_idx # [num_cgroups]
@@ -745,7 +757,7 @@ def mm_T(lhs: sbvr, rhs: sbvr, bias: torch.Tensor = None) -> torch.Tensor:
                      r_coeff_cache,
                      bias)
 
-def load(filename, device=None, verbose=0) -> sbvr:
+def load(filename, device=None, verbose=1) -> sbvr:
     serialized_sbvr = torch.load(filename)
     sbvr_obj = sbvr(sbvr_serialized=serialized_sbvr, 
                     verbose_level=verbose, device=device)

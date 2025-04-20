@@ -3,6 +3,7 @@
 #include <torch/extension.h>
 #include <iostream>
 #include <cstdint>
+#include <assert.h>
 
 // Declare the kernel launcher (templated in the actual .cu file)
 void launch_cuda_sbvr_mm_T(
@@ -20,8 +21,7 @@ void launch_cuda_sbvr_mm_T(
     int r_num_sums,
     int l_cache_size,
     int r_cache_size,
-    int cgroup_per_inner_vec,
-    int bvr_per_cgroup);
+    int cgroup_per_inner_vec);
 
 // PyTorch wrapper
 torch::Tensor sbvr_mm_T(torch::Tensor l_bvr,
@@ -32,14 +32,15 @@ torch::Tensor sbvr_mm_T(torch::Tensor l_bvr,
                         torch::Tensor r_coeff_cache,
                         c10::optional<torch::Tensor> bias_opt)
 {
-    int out_rows = l_bvr.size(0);
-    int out_cols = r_bvr.size(0);
+    int out_rows = l_bvr.size(0) * 4;
+    int out_cols = r_bvr.size(0) * 4;
     int l_num_sums = l_bvr.size(1);
     int r_num_sums = r_bvr.size(1);
     int l_cache_size = l_coeff_cache.size(0);
     int r_cache_size = r_coeff_cache.size(0);
     int cgroup_per_inner_vec = l_bvr.size(2);
     int bvr_per_cgroup = l_bvr.size(3);
+    assert (bvr_per_cgroup == 4);
 
     auto out = torch::empty({out_rows, out_cols},
                          torch::dtype(torch::kFloat16).device(l_bvr.device()));
@@ -66,8 +67,7 @@ torch::Tensor sbvr_mm_T(torch::Tensor l_bvr,
         r_num_sums,
         l_cache_size,
         r_cache_size,
-        cgroup_per_inner_vec,
-        bvr_per_cgroup);
+        cgroup_per_inner_vec);
 
     return out;
 }
