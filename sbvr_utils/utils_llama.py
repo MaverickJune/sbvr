@@ -1,5 +1,6 @@
-from transformers import LlamaForCausalLM, AutoTokenizer, BitsAndBytesConfig, FineGrainedFP8Config
-from models.sbvr_llama import SBVRLlamaForCausalLM
+from transformers import LlamaForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM
+# from models.sbvr_llama import SBVRLlamaForCausalLM
 import torch
 import sbvr
 import os
@@ -17,7 +18,7 @@ def decompress_sbvr_llama(weight_path=None, model=None):
 @torch.no_grad()
 def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="meta-llama/Llama-3.2-3B-Instruct", 
               device_map:str ="auto", use_sbvr:bool = False, use_llm_int8:bool = False, use_fp8:bool = False,
-              use_gptq_4:bool = False, weight_path:str = None):
+              use_gptq_4:bool = False, use_awq_4:bool = False, weight_path:str = None):
     r'''
     Fetch llama model from huggingfaces
 
@@ -51,6 +52,7 @@ def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="met
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=False)
     elif use_fp8: # Only works in hopper GPU (compute capability 9.0 and above)
         logger.info("Using Llama model with FP8")
+        from transformers import FineGrainedFP8Config
         fp8_config = FineGrainedFP8Config()
         model = LlamaForCausalLM.from_pretrained(
             model_path,
@@ -76,6 +78,25 @@ def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="met
         # model = GPTQModel.from_quantized(quantized_model_name, device="cuda:0")
         model = GPTQModel.load(quantized_model_name, device="cuda:0")
         tokenizer = model.tokenizer
+    elif use_awq_4:
+        logger.info("Using Llama model with AWQ 4-bit")
+        allowed_models = [("Llama-3.2-1B", "joshmiller656/Llama3.2-1B-AWQ-INT4"), 
+                          ("Llama-3.1-8B", "solidrust/Hermes-3-Llama-3.1-8B-AWQ")]
+        flag = False
+        quantized_model_name = ""
+        for item in allowed_models:
+            if item[0] in model_path:
+                flag = True
+                quantized_model_name = item[1]
+                break
+        if not flag:
+            raise ValueError(f"Model {model_path} is not supported for AWQ 4-bit. Supported models: {allowed_models}")
+        model = AutoModelForCausalLM.from_pretrained(
+            quantized_model_name,
+            device_map="cuda:0"
+        )
+        tokenizer = AutoTokenizer.from_pretrained(quantized_model_name, use_fast=False)
+            
     else: 
         model = LlamaForCausalLM.from_pretrained(
             model_path,
