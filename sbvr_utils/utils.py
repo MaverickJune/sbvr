@@ -7,13 +7,11 @@ from tqdm import tqdm
 from sbvr_utils.log_config import get_logger, ExtLogger
 logger = get_logger(__name__)
 
-
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.random.manual_seed(seed)
     
- 
 @torch.no_grad()   
 def eval_ppl(model=None, tokenizer=None, dataset="wikitext-2", seqlen=256, n_samples=-1):
     """
@@ -63,5 +61,6 @@ def eval_ppl(model=None, tokenizer=None, dataset="wikitext-2", seqlen=256, n_sam
     ppl = torch.exp(torch.tensor(acc_loss)).item()
     logger.info(f"Perplexity: {ppl:.4f}")
             
-        
-    
+@torch.inference_mode()
+def save_hidden_vector(model=None, tokenizer=None, dataset='wikitext-2', seqlen=256, n_samples=-1, save_path=None):
+    pass

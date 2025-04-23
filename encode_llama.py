@@ -31,8 +31,10 @@ def process_single_decoder_layer(layer_idx, target_layer, curr_device, num_sums=
         logger.info(f"Processing {weight_name} weight...")
         weight_path = os.path.join(save_path, f"layer_{layer_idx}_{weight_name}.pt")
         target_weight = target_weight.to(curr_device)
-        sbvr_compressed_weight = sbvr.sbvr(target_weight, num_sums=num_sums)
-        sbvr.save_sbvr(sbvr_compressed_weight, weight_path)
+        sbvr_compressed_weight = sbvr.sbvr(target_weight, 
+                                           encoder_config={"num_sums": num_sums},
+                                           device=curr_device)
+        sbvr_compressed_weight.save(weight_path)
         logger.info(f"Saved {weight_name} weight to {weight_path}")
     
 @torch.no_grad()
@@ -40,8 +42,10 @@ def process_lm_head(lm_head, num_sums=4, curr_device=0, save_path=None):
     logger.info("Processing lm_head...")
     weight_path = os.path.join(save_path, "lm_head_weight.pt")
     lm_head_weight = lm_head.weight.to(curr_device)
-    sbvr_compressed_weight = sbvr.sbvr(lm_head_weight, num_sums=num_sums)
-    sbvr.save_sbvr(sbvr_compressed_weight, weight_path)
+    sbvr_compressed_weight = sbvr.sbvr(lm_head_weight, 
+                                       encoder_config={"num_sums": num_sums},
+                                       device=curr_device)
+    sbvr_compressed_weight.save(weight_path)
     logger.info(f"Saved lm_head weight to {weight_path}")
     
 
@@ -86,7 +90,7 @@ def process_sbvr_llama_multi_gpu(model, num_sums=4, save_path="compressed_weight
 
 
 if __name__ == "__main__":
-    MODEL_PATH = "meta-llama/Llama-3.2-3B"
+    MODEL_PATH = "meta-llama/Llama-3.2-1B"
     NUM_SUMS = 4
     SAVE_PATH = "compressed_weights"
     

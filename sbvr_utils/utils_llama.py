@@ -17,7 +17,7 @@ def decompress_sbvr_llama(weight_path=None, model=None):
 @torch.no_grad()
 def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="meta-llama/Llama-3.2-3B-Instruct", 
               device_map:str ="auto", use_sbvr:bool = False, use_llm_int8:bool = False, use_fp8:bool = False,
-              weight_path:str = None):
+              use_gptq_4:bool = False, weight_path:str = None):
     r'''
     Fetch llama model from huggingfaces
 
@@ -37,6 +37,7 @@ def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="met
             device_map=device_map
         )
         sbvr_decompress_on_llama(model, weight_path)
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=False)
     elif use_llm_int8:
         logger.info("Using Llama model with LLM.int8")
         quantization_config = BitsAndBytesConfig(
@@ -47,6 +48,7 @@ def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="met
             device_map=device_map,
             quantization_config=quantization_config
         )
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=False)
     elif use_fp8: # Only works in hopper GPU (compute capability 9.0 and above)
         logger.info("Using Llama model with FP8")
         fp8_config = FineGrainedFP8Config()
@@ -56,14 +58,32 @@ def get_llama(model_path="meta-llama/Llama-3.2-3B-Instruct", tokenizer_path="met
             device_map=device_map,
             quantization_config=fp8_config
         )
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=False)
+    elif use_gptq_4:
+        from gptqmodel import GPTQModel
+        logger.info("Using Llama model with GPTQ 4-bit")
+        allowed_models = [("Llama-3.2-1B", "ModelCloud/Llama-3.2-1B-gptqmodel-ci-4bit"), 
+                          ("Llama-3.1-8B", "ModelCloud/Meta-Llama-3.1-8B-gptq-4bit")]
+        flag = False
+        quantized_model_name = ""
+        for item in allowed_models:
+            if item[0] in model_path:
+                flag = True
+                quantized_model_name = item[1]
+                break
+        if not flag:
+            raise ValueError(f"Model {model_path} is not supported for GPTQ 4-bit. Supported models: {allowed_models}")
+        # model = GPTQModel.from_quantized(quantized_model_name, device="cuda:0")
+        model = GPTQModel.load(quantized_model_name, device="cuda:0")
+        tokenizer = model.tokenizer
     else: 
         model = LlamaForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
             device_map=device_map
         )
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=False)
     model.eval()
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=False)
     
     return model, tokenizer
 
@@ -81,13 +101,13 @@ def sbvr_decompress_on_llama(model, weight_dir_path:str=None):
         for weight_name in attn_weights_name:
             device = layer.self_attn.__getattr__(weight_name + "_proj").weight.device
             weight_path = layer_path + f"{weight_name}.pt"
-            sbvr_weight = sbvr.load_sbvr(weight_path, device=device)
+            sbvr_weight = sbvr.load(weight_path, device=device)
             layer.self_attn.__getattr__(weight_name + "_proj").weight = torch.nn.Parameter(sbvr_weight.decode().to(device), requires_grad=False)
             logger.info(f"Decompressed {weight_name} weight from {weight_path}")
         for weight_name in ffn_weights_name:
             device = layer.mlp.__getattr__(weight_name).weight.device
             weight_path = layer_path + f"{weight_name}.pt"
-            sbvr_weight = sbvr.load_sbvr(weight_path, device=device)
+            sbvr_weight = sbvr.load(weight_path, device=device)
             layer.mlp.__getattr__(weight_name).weight = torch.nn.Parameter(sbvr_weight.decode().to(device), requires_grad=False)
             logger.info(f"Decompressed {weight_name} weight from {weight_path}")
             
