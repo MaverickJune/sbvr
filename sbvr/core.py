@@ -92,10 +92,11 @@ class _sbvr_serialized():
             raise ValueError(
                 _r_str(f"The BVR data type does not match - expected type " +
                       f"{self.bvr_dtype} but got {bvr.dtype}"))
-        if bvr.shape[0] != num_sums:
+        if bvr.shape[0] * bvr.shape[3] != num_sums:
             raise ValueError(
                 _r_str("The number of summations does not match the BVR, " +
-                      f"expected {num_sums} but got {bvr.shape[0]}"))
+                      f"expected {num_sums} but got " + 
+                      f"{bvr.shape[0] * bvr.shape[3]}"))
         if bvr.shape[1] * bvr_num_bits != self.padded_data_shape[-1]:
             raise ValueError(
                 _r_str("The BVR inner dimension does not match the padded "+
@@ -184,7 +185,7 @@ class sbvr(torch.nn.Module):
                 else torch.device("cpu")
         self.verbose_level = verbose_level
         
-        enforce_bvr_len = 128
+        enforce_bvr_len = 256
         enforce_compute_dtype = torch.float16
         enforce_bvr_dtype = torch.uint32
         
@@ -204,7 +205,7 @@ class sbvr(torch.nn.Module):
             enc_conf = _sbvr_enc_conf(**encoder_config)
             self.num_sums = enc_conf.num_sums
             self.bvr_len = enforce_bvr_len \
-                if enforce_bvr_len is not None else 128
+                if enforce_bvr_len is not None else 256
             self.compute_dtype = enforce_compute_dtype \
                 if enforce_compute_dtype is not None else torch.float16
             self.bvr_dtype = enforce_bvr_dtype \
@@ -559,18 +560,29 @@ class sbvr(torch.nn.Module):
             g_coeff_idx, coeff_sel = self._encode_data(group_data, enc_conf)
             self.coeff_idx[i] = g_coeff_idx
             out_coeff_sel[group_start:group_end] = coeff_sel
+    
+        bvr = self._change_coeff_sel_to_bvr(out_coeff_sel)
+        if self.num_sums % 2 != 0:
+            bvr = bvr.view(self.num_sums, 1, -1, 
+                    self._get_padded_data_shape()[-1] // 32)
+        else:
+            bvr = bvr.view(self.num_sums // 2, 2, -1, 
+                    self._get_padded_data_shape()[-1] // 32)
+        bvr = bvr.permute(0, 3, 2, 1).contiguous()
+        self.bvr = torch.nn.Parameter(bvr, requires_grad=False)
         
         self.coeff_cache = \
             self.coeff_cache[:enc_conf.num_coeff_cache_lines].contiguous()
         if enc_conf.num_coeff_cache_lines < 2**8:
             self.coeff_idx = self.coeff_idx.to(torch.uint8)
+        self.coeff_idx = \
+            self.coeff_idx.view(-1, self.bvr.shape[1] // \
+                                (self.bvr_len // self._get_bvr_num_bits()))
+        self.coeff_idx = self.coeff_idx.transpose(0, 1).contiguous()
             
         self.coeff_idx = torch.nn.Parameter(self.coeff_idx, requires_grad=False)
         self.coeff_cache = torch.nn.Parameter(self.coeff_cache,
                                               requires_grad=False)
-        self.bvr = torch.nn.Parameter(
-            self._change_coeff_sel_to_bvr(out_coeff_sel),
-            requires_grad=False)
         
         if self.verbose_level > 0:
             print(_b_str("Encoding complete."))
@@ -605,22 +617,13 @@ class sbvr(torch.nn.Module):
                 bin_vec.transpose(0, 1).reshape(self.num_sums, -1, num_bits)
             bvr_i = torch.sum(bin_vec * powers.unsqueeze(0), dim=2)
             bvr[:, i//32:max_i//32] = bvr_i
-            
-        bvr = bvr.view(self.num_sums, -1, 
-                       self._get_padded_data_shape()[-1] // 32)
-        bvr_padded_rows = (bvr.shape[1] + 4 - 1) // 4 * 4
-        bvr_padded = torch.zeros((self.num_sums, bvr_padded_rows,
-                                 self._get_padded_data_shape()[-1] // 32),
-                                 dtype=self.bvr_dtype,
-                                 device=self.coeff_cache.device)
-        bvr_padded[:, :bvr.shape[1], :] = bvr
-        bvr_padded = bvr_padded.permute(0, 2, 1).contiguous()
-        return bvr_padded
+        
+        return bvr
      
     @torch.inference_mode()
     def _change_bvr_to_coeff_sel(self):
         coeff_sel_len = self._get_padded_data_shape().numel()
-        bvr = self.bvr.permute(0, 2, 1).contiguous()
+        bvr = self.bvr.permute(0, 3, 2, 1).contiguous().view(self.num_sums, -1)
         bvr = bvr.view(self.num_sums, -1)
         num_bits = self._get_bvr_num_bits()
         powers = 2 ** torch.arange(num_bits, 
@@ -669,13 +672,14 @@ class sbvr(torch.nn.Module):
         decoded_tensor = torch.empty(self._get_padded_data_shape(),
                                       dtype=self.original_dtype,
                                       device=self.coeff_cache.device)
-        num_bvr = self.coeff_idx.shape[0]
+        num_bvr = self.coeff_idx.numel()
         coeff_sel = self._change_bvr_to_coeff_sel()
+        coeff_idx = self.coeff_idx.transpose(0, 1).contiguous().flatten()
         for i in range(num_bvr):
             group_start = i * self.bvr_len
             group_end = \
                 min(group_start + self.bvr_len, decoded_tensor.numel())
-            group_coeff = self.coeff_cache[self.coeff_idx[i].item()]
+            group_coeff = self.coeff_cache[coeff_idx[i].item()]
             group_coeff_sel = coeff_sel[group_start:group_end]
             group_all_points = self._get_all_points(group_coeff)
             group_data = group_all_points[group_coeff_sel]
@@ -725,16 +729,16 @@ def mm_T(lhs: sbvr, rhs: sbvr, bias: torch.Tensor = None) -> torch.Tensor:
         rhs.compute_dtype != torch.float16 or \
         lhs.bvr_dtype != torch.uint32 or \
         rhs.bvr_dtype != torch.uint32 or \
-        lhs.bvr_len != 128 or \
-        rhs.bvr_len != 128:
+        lhs.bvr_len != 256 or \
+        rhs.bvr_len != 256:
             print(_r_str("Warning: SBVR objects are not using the default " +
-                        "parameters. Using unoptimized SBVR MM_T.") +
-                _y_str("lhs compute dtype: ") + f"{lhs.compute_dtype}, " +
-                _y_str("rhs compute dtype: ") + f"{rhs.compute_dtype}, " +
-                _y_str("lhs bvr dtype: ") + f"{lhs.bvr_dtype}, " +
-                _y_str("rhs bvr dtype: ") + f"{rhs.bvr_dtype}, " +
-                _y_str("lhs bvr len: ") + f"{lhs.bvr_len}, " +
-                _y_str("rhs bvr len: ") + f"{rhs.bvr_len}")
+                        "parameters. Using unoptimized torch SBVR MM_T.") +
+                _y_str("\n\tlhs compute dtype: ") + f"{lhs.compute_dtype}, " +
+                _y_str("\n\trhs compute dtype: ") + f"{rhs.compute_dtype}, " +
+                _y_str("\n\tlhs bvr dtype: ") + f"{lhs.bvr_dtype}, " +
+                _y_str("\n\trhs bvr dtype: ") + f"{rhs.bvr_dtype}, " +
+                _y_str("\n\tlhs bvr len: ") + f"{lhs.bvr_len}, " +
+                _y_str("\n\trhs bvr len: ") + f"{rhs.bvr_len}")
             mm = lhs.decode() @ rhs.decode().T 
             if bias is not None:
                 mm += bias

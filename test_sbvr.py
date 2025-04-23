@@ -112,18 +112,18 @@ def sbvr_randn_test(mat_len=512, sbvr_max_sums=6, device=torch.device("cpu")):
         time_dict[i] = time.time() - time_start
 
     print(y_str("Matix Size: ") + str(mat_size))
-    print(b_str("Case 1: Conversion to float32"))
+    print(b_str("Case 1: Conversion to " + "float32"))
     print_errors(mat_c_64, mat_c_32)
-    print(b_str("Case 2: Conversion to float16"))
+    print(b_str("Case 2: Conversion to " + "float16"))
     print_errors(mat_c_64, mat_c_16)
-    print(b_str("Case 3: Conversion to bfloat16")) 
+    print(b_str("Case 3: Conversion to " + "bfloat16")) 
     print_errors(mat_c_64, mat_c_bf16)
-    print(b_str("Case 4: Conversion to float8_e4m3fn"))
+    print(b_str("Case 4: Conversion to " + "float8_e4m3fn"))
     print_errors(mat_c_64, mat_c_e4m3fn)
-    print(b_str("Case 5: Conversion to float8_e5m2"))
+    print(b_str("Case 5: Conversion to " + "float8_e5m2"))
     print_errors(mat_c_64, mat_c_e5m2)
     for i, (key, value) in enumerate(sbvr_dict.items()):
-        print(b_str(f"Case {i+6}: Conversion to SBVR {key} bits"))
+        print(b_str(f"Case {i+6}: Conversion to " + f"SBVR {key} bits"))
         print_errors(mat_c_64, value)
         print(y_str("\tTime taken: ") + f"{time_dict[key]:.4f} seconds")
     
@@ -146,25 +146,30 @@ def sbvr_store_and_load_test(mat_len=512, sbvr_max_sums=6,
            
 def sbvr_mat_mat_mult_test(mat_len=512, sbvr_max_sums=6, 
                            device=torch.device("cpu"), do_print = False):
-    # mat_a = torch.tensor([[1, 3.14, 0]], dtype=torch.float16, device=device)
-    # mat_b = torch.tensor([[1, 0, 1],
-    #                       [0, 1, 0],
-    #                       [1, 0, 1],], 
-    #                     dtype=torch.float16, device=device)
-    mat_a_out_path = f"{out_dir}/matrix_a_{mat_len}.pt"
-    if not os.path.exists(mat_a_out_path):
-        mat_a = torch.randn((mat_len, mat_len), 
-                            dtype=torch.float16, device=device)*0.3
-        torch.save(mat_a, mat_a_out_path)
-    else:
-        mat_a = torch.load(mat_a_out_path).to(device)
-    mat_b_out_path = f"{out_dir}/matrix_b_{mat_len}.pt"
-    if not os.path.exists(mat_b_out_path):
-        mat_b = torch.randn((mat_len, mat_len), 
-                            dtype=torch.float16, device=device)*0.3
-        torch.save(mat_b, mat_b_out_path)
-    else:
-        mat_b = torch.load(mat_b_out_path).to(device)
+    mat_a = torch.tensor([[1, 3.14, 0]], dtype=torch.float16, device=device)
+    mat_b = torch.tensor([[1, 0, 1],
+                          [0, 1, 0],
+                          [1, 0, 1],
+                          [0, 0, 0],
+                          [0, 0, 0],
+                          [0, 0, 0],
+                          [0, 0, 0],
+                          [0, 0, 0],], 
+                        dtype=torch.float16, device=device)
+    # mat_a_out_path = f"{out_dir}/matrix_a_{mat_len}.pt"
+    # if not os.path.exists(mat_a_out_path):
+    #     mat_a = torch.randn((mat_len, mat_len), 
+    #                         dtype=torch.float16, device=device)*0.3
+    #     torch.save(mat_a, mat_a_out_path)
+    # else:
+    #     mat_a = torch.load(mat_a_out_path).to(device)
+    # mat_b_out_path = f"{out_dir}/matrix_b_{mat_len}.pt"
+    # if not os.path.exists(mat_b_out_path):
+    #     mat_b = torch.randn((mat_len, mat_len), 
+    #                         dtype=torch.float16, device=device)*0.3
+    #     torch.save(mat_b, mat_b_out_path)
+    # else:
+    #     mat_b = torch.load(mat_b_out_path).to(device)
     bias = torch.randn((mat_b.size(0),), dtype=torch.float16, device=device)*0.3
     mat_mat_ab = mat_a @ mat_b.T + bias
     if do_print:
