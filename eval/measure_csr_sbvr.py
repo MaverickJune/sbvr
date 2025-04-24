@@ -40,6 +40,24 @@ def run_csr_eval_for_sbvr_model():
     for task, result in results["results"].items():
         print(f"Task: {task}")
         print(f"Result: {result}\n")
+        
+def run_eval_original():
+    results = evaluator.simple_evaluate(
+        model="hf",
+        model_args=f"pretrained={MODEL_PATH},trust_remote_code=True",
+        tasks=[
+            "arc_easy", "arc_challenge", "boolq", "hellaswag",
+            "openbookqa", "piqa", "social_iqa", "winogrande"
+        ],
+        num_fewshot=0,
+        batch_size=1,
+        device="cuda"
+    )
+
+    for task, result in results["results"].items():
+        print(f"Task: {task}")
+        print(f"Result: {result}\n")
     
 if __name__ == "__main__":
-    run_csr_eval_for_sbvr_model()
+    # run_csr_eval_for_sbvr_model()
+    run_eval_original()
