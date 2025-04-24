@@ -362,17 +362,17 @@ void launch_tMxtN_sbvr_kernel(
     dim3 threads = {T_BLOCK_TILE_SIZE / TILE_M, 
                     T_BLOCK_TILE_SIZE / TILE_N, 1};
 
-    std::cout << "Launching " << TILE_M << "x" << TILE_N << " SBVR kernel <" 
-              << typeid(LIndexT).name() << ", " 
-              << typeid(RIndexT).name() << ", "
-              << "l_num_sums: " << L_NUM_SUMS << ", "
-              << "r_num_sums: " << R_NUM_SUMS << ", "
-              << "M: " << M << ", "
-              << "N: " << N << ", "
-              << "K: " << K << ", "
-              << "blocks: " << blocks << ", " 
-              << "threads: (" << threads.x << ", " 
-              << threads.y << ", " << threads.z << ")" << std::endl;
+    // std::cout << "Launching " << TILE_M << "x" << TILE_N << " SBVR kernel <" 
+    //           << typeid(LIndexT).name() << ", " 
+    //           << typeid(RIndexT).name() << ", "
+    //           << "l_num_sums: " << L_NUM_SUMS << ", "
+    //           << "r_num_sums: " << R_NUM_SUMS << ", "
+    //           << "M: " << M << ", "
+    //           << "N: " << N << ", "
+    //           << "K: " << K << ", "
+    //           << "blocks: " << blocks << ", " 
+    //           << "threads: (" << threads.x << ", " 
+    //           << threads.y << ", " << threads.z << ")" << std::endl;
 
     cuda_tMxtN_sbvr_mm_T<LIndexT, RIndexT, L_NUM_SUMS, R_NUM_SUMS, 
         TILE_M, TILE_N> <<<blocks, threads>>>(
@@ -451,17 +451,17 @@ void launch_1xtN_sbvr_kernel(
     int blocks = prop.multiProcessorCount * 8;
     dim3 threads = {TILE_N, THREAD_PER_WARP / TILE_N};
 
-    std::cout << "Launching " << 1 << "x" << TILE_N << " SBVR kernel <" 
-              << typeid(LIndexT).name() << ", " 
-              << typeid(RIndexT).name() << ", "
-              << "l_num_sums: " << L_NUM_SUMS << ", "
-              << "r_num_sums: " << R_NUM_SUMS << ", "
-              << "M: " << M << ", "
-              << "N: " << N << ", "
-              << "K: " << K << ", "
-              << "blocks: " << blocks << ", " 
-              << "threads: (" << threads.x << ", " 
-              << threads.y << ", " << threads.z << ")" << std::endl;
+    // std::cout << "Launching " << 1 << "x" << TILE_N << " SBVR kernel <" 
+    //           << typeid(LIndexT).name() << ", " 
+    //           << typeid(RIndexT).name() << ", "
+    //           << "l_num_sums: " << L_NUM_SUMS << ", "
+    //           << "r_num_sums: " << R_NUM_SUMS << ", "
+    //           << "M: " << M << ", "
+    //           << "N: " << N << ", "
+    //           << "K: " << K << ", "
+    //           << "blocks: " << blocks << ", " 
+    //           << "threads: (" << threads.x << ", " 
+    //           << threads.y << ", " << threads.z << ")" << std::endl;
 
     cuda_1xtN_sbvr_mm_T<LIndexT, RIndexT, L_NUM_SUMS, R_NUM_SUMS, 
         TILE_N> <<<blocks, threads>>>(
@@ -568,13 +568,13 @@ void launch_cuda_sbvr_mm_T(
 {
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
-    printf("Shared memory per block: %zu bytes\n", prop.sharedMemPerBlock);
-    printf("Shared memory per SM: %zu bytes\n", prop.sharedMemPerMultiprocessor);
+    // printf("Shared memory per block: %zu bytes\n", prop.sharedMemPerBlock);
+    // printf("Shared memory per SM: %zu bytes\n", prop.sharedMemPerMultiprocessor);
 
-    std::cout << "sbvr_mm_T: M=" << M << ", N=" << N << ", K=" << K
-    << ", l_num_sums=" << l_num_sums << ", r_num_sums=" << r_num_sums
-    << ", l_cache_size=" << l_cache_size << ", r_cache_size=" << r_cache_size
-    << std::endl;
+    // std::cout << "sbvr_mm_T: M=" << M << ", N=" << N << ", K=" << K
+    // << ", l_num_sums=" << l_num_sums << ", r_num_sums=" << r_num_sums
+    // << ", l_cache_size=" << l_cache_size << ", r_cache_size=" << r_cache_size
+    // << std::endl;
 
     const bool use_l_uint8 = (l_cache_size <= 256);
     const bool use_r_uint8 = (r_cache_size <= 256);

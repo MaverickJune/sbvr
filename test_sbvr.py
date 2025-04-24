@@ -99,13 +99,13 @@ def sbvr_randn_test(mat_len=512, sbvr_max_sums=6, device=torch.device("cpu")):
         mat_a_sbvr = sbvr.sbvr(mat_a, verbose_level=2, 
                                encoder_config={"num_sums": i},
                                device=device)
-        sbvr_mat_a_path = f"{out_dir}/sbvr_{i}_matrix_a_{mat_len}.pt"
-        mat_a_sbvr.save(sbvr_mat_a_path)
+        mat_a_sbvr_path = f"{out_dir}/sbvr_{i}_matrix_a_{mat_len}.pt"
+        mat_a_sbvr.save(mat_a_sbvr_path)
         mat_b_sbvr = sbvr.sbvr(mat_b, verbose_level=2, 
                                encoder_config={"num_sums": i},
                                device=device)
-        sbvr_mat_b_path = f"{out_dir}/sbvr_{i}_matrix_b_{mat_len}.pt"
-        mat_b_sbvr.save(sbvr_mat_b_path)
+        mat_b_sbvr_path = f"{out_dir}/sbvr_{i}_matrix_b_{mat_len}.pt"
+        mat_b_sbvr.save(mat_b_sbvr_path)
         sbvr_matmul = f64_matmul(mat_a_sbvr.decode(), 
                                  mat_b_sbvr.decode())
         sbvr_dict[i] = sbvr_matmul
@@ -156,9 +156,9 @@ def sbvr_mat_mat_mult_test(mat_len=512, sbvr_max_sums=6,
     #                       [0, 0, 0],
     #                       [0, 0, 0],], 
     #                     dtype=torch.float16, device=device)
-    mat_a_out_path = f"{out_dir}/matrix_a_{mat_len}.pt"
+    mat_a_out_path = f"{out_dir}/matrix_a_1_{mat_len}.pt"
     if not os.path.exists(mat_a_out_path):
-        mat_a = torch.randn((mat_len, mat_len), 
+        mat_a = torch.randn((1, mat_len), 
                             dtype=torch.float16, device=device)*0.3
         torch.save(mat_a, mat_a_out_path)
     else:
@@ -177,39 +177,39 @@ def sbvr_mat_mat_mult_test(mat_len=512, sbvr_max_sums=6,
         print_tensor(mat_b.T, "mat_b_T")
         print_tensor(mat_mat_ab, "mat_mat_ab")
         
-    sbvr_mat_a_path = f"{out_dir}/sbvr_{sbvr_max_sums}_matrix_a_{mat_len}.pt"
-    sbvr_mat_b_path = f"{out_dir}/sbvr_{sbvr_max_sums}_matrix_b_{mat_len}.pt"
-    if not os.path.exists(sbvr_mat_a_path):
-        sbvr_mat_a = sbvr.sbvr(mat_a, 
+    mat_a_sbvr_path = f"{out_dir}/sbvr_{sbvr_max_sums}_matrix_a_{mat_a.size(0)}_{mat_a.size(1)}.pt"
+    if not os.path.exists(mat_a_sbvr_path):
+        mat_a_sbvr = sbvr.sbvr(mat_a, 
                                encoder_config={"num_sums": sbvr_max_sums},
-                               verbose_level=1 if do_print else 0,
                                device=device)
-        sbvr_mat_a.save(sbvr_mat_a_path)
+        mat_a_sbvr.save(mat_a_sbvr_path)
     else:
-        sbvr_mat_a = sbvr.load(sbvr_mat_a_path, device=device)
-    if not os.path.exists(sbvr_mat_b_path):
-        sbvr_mat_b = sbvr.sbvr(mat_b, 
+        mat_a_sbvr = sbvr.load(mat_a_sbvr_path, device=device)
+    mat_b_sbvr_path = f"{out_dir}/sbvr_{sbvr_max_sums}_matrix_b_{mat_a.size(0)}_{mat_a.size(1)}.pt"
+    if not os.path.exists(mat_b_sbvr_path):
+        mat_b_sbvr = sbvr.sbvr(mat_b, 
                                encoder_config={"num_sums": sbvr_max_sums},
-                               verbose_level=1 if do_print else 0,
                                device=device)
-        sbvr_mat_b.save(sbvr_mat_b_path)
+        mat_b_sbvr.save(mat_b_sbvr_path)
     else:
-        sbvr_mat_b = sbvr.load(sbvr_mat_b_path, device=device)
-    sbvr_decoded_mat_mat_ab = sbvr_mat_a.decode() @ sbvr_mat_b.decode().T + bias
+        mat_b_sbvr = sbvr.load(mat_b_sbvr_path, device=device)
+    sbvr_decoded_mat_mat_ab = mat_a_sbvr.decode() @ mat_b_sbvr.decode().T + bias
     
     if do_print:
-        print_tensor(sbvr_mat_a.bvr, "sbvr_mat_a.bvr")
-        print_tensor(sbvr_mat_a.coeff_idx, "sbvr_mat_a.coeff_idx")
-        print_tensor(sbvr_mat_a.coeff_cache, "sbvr_mat_a.coeff_cache")
-        print_tensor(sbvr_mat_a.decode(), "sbvr_mat_a")
-        print_tensor(sbvr_mat_b.bvr, "sbvr_mat_b.bvr")
-        print_tensor(sbvr_mat_b.coeff_idx, "sbvr_mat_b.coeff_idx")
-        print_tensor(sbvr_mat_b.coeff_cache, "sbvr_mat_b.coeff_cache")
-        print_tensor(sbvr_mat_b.decode(), "sbvr_mat_b")
-        print_tensor(sbvr_mat_b.decode().T, "sbvr_mat_b_T")
+        print_tensor(mat_a_sbvr.bvr, "mat_a_sbvr.bvr")
+        print_tensor(mat_a_sbvr.coeff_idx, "mat_a_sbvr.coeff_idx")
+        print_tensor(mat_a_sbvr.coeff_cache, "mat_a_sbvr.coeff_cache")
+        print_tensor(mat_a_sbvr.decode(), "mat_a_sbvr")
+        print_tensor(mat_b_sbvr.bvr, "mat_b_sbvr.bvr")
+        print_tensor(mat_b_sbvr.coeff_idx, "mat_b_sbvr.coeff_idx")
+        print_tensor(mat_b_sbvr.coeff_cache, "mat_b_sbvr.coeff_cache")
+        print_tensor(mat_b_sbvr.decode(), "mat_b_sbvr")
+        print_tensor(mat_b_sbvr.decode().T, "mat_b_sbvr_T")
         print_tensor(sbvr_decoded_mat_mat_ab, "sbvr_decoded_mat_mat_ab")
     
-    sbvr_cuda_mat_mat_ab = sbvr.mm_T(sbvr_mat_a, sbvr_mat_b, bias)
+    torch.cuda.nvtx.range_push("SBVR CUDA MatMul")
+    sbvr_cuda_mat_mat_ab = sbvr.mm_T(mat_a_sbvr, mat_b_sbvr, bias)
+    torch.cuda.nvtx.range_pop()
     if do_print:
         print_tensor(sbvr_cuda_mat_mat_ab, "sbvr_cuda_mat_mat_ab")
         
@@ -223,11 +223,11 @@ def sbvr_mat_mat_mult_test(mat_len=512, sbvr_max_sums=6,
 def sbvr_matmul_time_test(mat_len=512, sbvr_max_sums=6, 
                           device=torch.device("cpu"), num_runs=1000):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    mat_size = (mat_len, mat_len)
 
-    mat_a_out_path = f"{out_dir}/matrix_a_{mat_len}.pt"
+    mat_a_out_path = f"{out_dir}/matrix_a_1_{mat_len}.pt"
     if not os.path.exists(mat_a_out_path):
-        mat_a = torch.randn(mat_size, dtype=torch.float16, device=device)*0.3
+        mat_a = torch.randn((1, mat_len), 
+                            dtype=torch.float16, device=device)*0.3
         torch.save(mat_a, mat_a_out_path)
     else:
         mat_a = torch.load(mat_a_out_path).to(device)
@@ -238,7 +238,7 @@ def sbvr_matmul_time_test(mat_len=512, sbvr_max_sums=6,
         torch.save(mat_b, mat_b_out_path)
     else:
         mat_b = torch.load(mat_b_out_path).to(device)
-    bias = torch.randn((mat_len,), dtype=torch.float16, device=device)*0.3
+    bias = torch.randn((mat_b.size(0),), dtype=torch.float16, device=device)*0.3
 
     time_start = time.time()
     for _ in range(num_runs):
@@ -248,14 +248,14 @@ def sbvr_matmul_time_test(mat_len=512, sbvr_max_sums=6,
     sbvr_time = {}
     sbvr_dict = {}
     for i in range (sbvr_max_sums, 1, -2):
-        mat_a_sbvr_path = f"{out_dir}/sbvr_{i}_matrix_a_{mat_len}.pt"
+        mat_a_sbvr_path = f"{out_dir}/sbvr_{i}_matrix_a_{mat_a.size(0)}_{mat_a.size(1)}.pt"
         if not os.path.exists(mat_a_sbvr_path):
             mat_a_sbvr = sbvr.sbvr(mat_a, encoder_config={"num_sums": i},
                                    device=device)
             mat_a_sbvr.save(mat_a_sbvr_path)
         else:
             mat_a_sbvr = sbvr.load(mat_a_sbvr_path, device=device)
-        mat_b_sbvr_path = f"{out_dir}/sbvr_{i}_matrix_b_{mat_len}.pt"
+        mat_b_sbvr_path = f"{out_dir}/sbvr_{i}_matrix_b_{mat_a.size(0)}_{mat_a.size(1)}.pt"
         if not os.path.exists(mat_b_sbvr_path):
             mat_b_sbvr = sbvr.sbvr(mat_b, encoder_config={"num_sums": i},
                                    device=device)
@@ -268,7 +268,7 @@ def sbvr_matmul_time_test(mat_len=512, sbvr_max_sums=6,
         sbvr_time[i] = (time.time() - time_start) / num_runs
         sbvr_dict[i] = sbvr_matmul
 
-    print(y_str("Matix Size: ") + str(mat_size))
+    print(y_str("Matix Size: ") + str(mat_len))
     for i, (key, value) in enumerate(sbvr_dict.items()):
         print(b_str(f"Case {i+1}: f16 matmul vs SBVR {key} bits"))
         print_errors(f16_matmul, value)
@@ -289,4 +289,4 @@ if __name__ == "__main__":
     # sbvr_store_and_load_test(int(mat_len), int(sbvr_max_sums), device=device)
     sbvr_mat_mat_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device)
-    os.system(f"rm -rf {out_dir}")
+    # os.system(f"rm -rf {out_dir}")
