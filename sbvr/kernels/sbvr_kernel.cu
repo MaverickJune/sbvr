@@ -14,6 +14,8 @@ typedef void (*KernelLaunchFn)(
     __half* bias, __half* out,
     int M, int N, int K);
 
+cudaDeviceProp cuda_prop;
+
 template <typename LIndexT, typename RIndexT>
 __global__ void cuda_naive_sbvr_mm_T(
     uint32_t* l_bvr, LIndexT* l_coeff_idx, __half* __restrict__ l_coeff_cache,
@@ -315,9 +317,7 @@ void launch_naive_sbvr_kernel(
     int M, int N, int K,
     int l_num_sums, int r_num_sums)
 {
-    cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, 0);
-    int blocks = prop.multiProcessorCount * 8;
+    int blocks = cuda_prop.multiProcessorCount * 8;
     dim3 threads = 32;
 
     std::cout << "Launching naive SBVR kernel <" 
@@ -355,10 +355,8 @@ void launch_tMxtN_sbvr_kernel(
     __half* bias, __half* out,
     int M, int N, int K)
 {
-    cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, 0);
     int blocks = 4;
-    // int blocks = prop.multiProcessorCount * 8;
+    // int blocks = cuda_prop.multiProcessorCount * 8;
     dim3 threads = {T_BLOCK_TILE_SIZE / TILE_M, 
                     T_BLOCK_TILE_SIZE / TILE_N, 1};
 
@@ -445,10 +443,8 @@ void launch_1xtN_sbvr_kernel(
     __half* bias, __half* out,
     int M, int N, int K)
 {
-    cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, 0);
     // int blocks = 1;
-    int blocks = prop.multiProcessorCount * 8;
+    int blocks = cuda_prop.multiProcessorCount * 8;
     dim3 threads = {TILE_N, THREAD_PER_WARP / TILE_N};
 
     // std::cout << "Launching " << 1 << "x" << TILE_N << " SBVR kernel <" 
@@ -566,10 +562,8 @@ void launch_cuda_sbvr_mm_T(
     int l_num_sums, int r_num_sums,
     int l_cache_size, int r_cache_size)
 {
-    cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, 0);
-    // printf("Shared memory per block: %zu bytes\n", prop.sharedMemPerBlock);
-    // printf("Shared memory per SM: %zu bytes\n", prop.sharedMemPerMultiprocessor);
+    // printf("Shared memory per block: %zu bytes\n", cuda_prop.sharedMemPerBlock);
+    // printf("Shared memory per SM: %zu bytes\n", cuda_prop.sharedMemPerMultiprocessor);
 
     // std::cout << "sbvr_mm_T: M=" << M << ", N=" << N << ", K=" << K
     // << ", l_num_sums=" << l_num_sums << ", r_num_sums=" << r_num_sums

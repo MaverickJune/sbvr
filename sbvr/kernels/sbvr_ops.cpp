@@ -59,7 +59,15 @@ torch::Tensor sbvr_mm_T(torch::Tensor l_bvr,
     return out;
 }
 
+void sbvr_cuda_init()
+{
+    extern cudaDeviceProp cuda_prop;
+    cudaGetDeviceProperties(&cuda_prop, 0);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("sbvr_cuda_init", &sbvr_cuda_init,
+        "Initialization function for the SBVR CUDA kernels");
     m.def("sbvr_mm_T", &sbvr_mm_T, 
           py::arg("l_bvr"),
           py::arg("l_coeff_idx"),
