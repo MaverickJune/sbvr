@@ -28,8 +28,8 @@ torch::Tensor sbvr_mm_T(torch::Tensor l_bvr,
     int N = r_bvr.size(2);
     int K = l_bvr.size(1);
     assert (l_bvr.size(1) == r_bvr.size(1));
-    int l_num_sums = l_bvr.size(0);
-    int r_num_sums = r_bvr.size(0);
+    int l_num_sums = l_bvr.size(0) * l_bvr.size(3);
+    int r_num_sums = r_bvr.size(0) * r_bvr.size(3);
     int l_cache_size = l_coeff_cache.size(0);
     int r_cache_size = r_coeff_cache.size(0);
 

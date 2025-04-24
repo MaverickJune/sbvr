@@ -146,31 +146,31 @@ def sbvr_store_and_load_test(mat_len=512, sbvr_max_sums=6,
            
 def sbvr_mat_mat_mult_test(mat_len=512, sbvr_max_sums=6, 
                            device=torch.device("cpu"), do_print = False):
-    mat_a = torch.tensor([[1, 3.14, 0]], dtype=torch.float16, device=device)
-    mat_b = torch.tensor([[1, 0, 1],
-                          [0, 1, 0],
-                          [1, 0, 1],
-                          [0, 0, 0],
-                          [0, 0, 0],
-                          [0, 0, 0],
-                          [0, 0, 0],
-                          [0, 0, 0],], 
-                        dtype=torch.float16, device=device)
-    # mat_a_out_path = f"{out_dir}/matrix_a_{mat_len}.pt"
-    # if not os.path.exists(mat_a_out_path):
-    #     mat_a = torch.randn((mat_len, mat_len), 
-    #                         dtype=torch.float16, device=device)*0.3
-    #     torch.save(mat_a, mat_a_out_path)
-    # else:
-    #     mat_a = torch.load(mat_a_out_path).to(device)
-    # mat_b_out_path = f"{out_dir}/matrix_b_{mat_len}.pt"
-    # if not os.path.exists(mat_b_out_path):
-    #     mat_b = torch.randn((mat_len, mat_len), 
-    #                         dtype=torch.float16, device=device)*0.3
-    #     torch.save(mat_b, mat_b_out_path)
-    # else:
-    #     mat_b = torch.load(mat_b_out_path).to(device)
-    bias = torch.randn((mat_b.size(0),), dtype=torch.float16, device=device)*0.3
+    # mat_a = torch.tensor([[1, 3.14, 0]], dtype=torch.float16, device=device)
+    # mat_b = torch.tensor([[1, 0, 1],
+    #                       [0, 1, 0],
+    #                       [1, 0, 1],
+    #                       [0, 0, 0],
+    #                       [0, 0, 0],
+    #                       [0, 0, 0],
+    #                       [0, 0, 0],
+    #                       [0, 0, 0],], 
+    #                     dtype=torch.float16, device=device)
+    mat_a_out_path = f"{out_dir}/matrix_a_{mat_len}.pt"
+    if not os.path.exists(mat_a_out_path):
+        mat_a = torch.randn((mat_len, mat_len), 
+                            dtype=torch.float16, device=device)*0.3
+        torch.save(mat_a, mat_a_out_path)
+    else:
+        mat_a = torch.load(mat_a_out_path).to(device)
+    mat_b_out_path = f"{out_dir}/matrix_b_{mat_len}.pt"
+    if not os.path.exists(mat_b_out_path):
+        mat_b = torch.randn((mat_len, mat_len), 
+                            dtype=torch.float16, device=device)*0.3
+        torch.save(mat_b, mat_b_out_path)
+    else:
+        mat_b = torch.load(mat_b_out_path).to(device)
+    bias = torch.zeros((mat_b.size(0),), dtype=torch.float16, device=device)*0.3
     mat_mat_ab = mat_a @ mat_b.T + bias
     if do_print:
         print_tensor(mat_a, "mat_a")
