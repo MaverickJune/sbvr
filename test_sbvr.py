@@ -43,6 +43,15 @@ def load_or_create_sbvr(name, shape, device, num_sums, verbose_level=0):
                                 device=device, verbose_level=verbose_level)
         sbvr_tensor.save(file_path)
         return sbvr_tensor
+    
+def create_sbvr(tensor, name, shape, device, num_sums, verbose_level=0):
+    shape_str = "_".join(map(str, shape))
+    file_path = f"{out_dir}/sbvr_{num_sums}_{name}_[{shape_str}].pt"
+    sbvr_tensor = sbvr.sbvr(tensor, encoder_config={"num_sums": num_sums}, 
+                            device=device, verbose_level=verbose_level)
+    sbvr_tensor.save(file_path)
+    return sbvr_tensor
+
 
 def get_errors(tensor1, tensor2):
     if tensor1.shape != tensor2.shape:
@@ -161,10 +170,14 @@ def sbvr_mat_mat_mult_test(mat_len=512, num_sums=6,
         print_tensor(mat_b.T, "mat_b_T")
         print_tensor(mat_mat_ab, "mat_mat_ab")
         
+    # mat_a_sbvr = create_sbvr(mat_a, "matrix_a", (mat_a.size(0), mat_a.size(1)), 
+    #                          device, num_sums, verbose_level=0)
+    # mat_b_sbvr = create_sbvr(mat_b, "matrix_b", (mat_b.size(0), mat_b.size(1)), 
+    #                          device, num_sums, verbose_level=0)
     mat_a_sbvr = load_or_create_sbvr("matrix_a", (mat_len, mat_len), device,
-                                    num_sums, verbose_level=0)
+                                    num_sums, verbose_level=1)
     mat_b_sbvr = load_or_create_sbvr("matrix_b", (mat_len, mat_len), device,
-                                    num_sums, verbose_level=0)
+                                    num_sums, verbose_level=1)
     lhs_bvr = mat_a_sbvr.bvr
     lhs_coeff_idx = mat_a_sbvr.coeff_idx
     lhs_coeff_cache = mat_a_sbvr.coeff_cache
@@ -172,17 +185,23 @@ def sbvr_mat_mat_mult_test(mat_len=512, num_sums=6,
     rhs_coeff_idx = mat_b_sbvr.coeff_idx
     rhs_coeff_cache = mat_b_sbvr.coeff_cache
     
-    torch.cuda.profiler.cudart().cudaProfilerStart()
-    torch.cuda.nvtx.range_push("PyTorch CUDA MatMul")
     sbvr_decoded_mat_mat_ab = mat_a_sbvr.decode() @ mat_b_sbvr.decode().T + bias
-    torch.cuda.nvtx.range_pop()
-    torch.cuda.nvtx.range_push("SBVR CUDA MatMul")
     sbvr_cuda_mat_mat_ab = sbvr.sbvr_mm_T(
                                 lhs_bvr, lhs_coeff_idx, lhs_coeff_cache,
                                 rhs_bvr, rhs_coeff_idx, rhs_coeff_cache,
                                 bias)
-    torch.cuda.nvtx.range_pop()
-    torch.cuda.profiler.cudart().cudaProfilerStop()
+    
+    # torch.cuda.profiler.cudart().cudaProfilerStart()
+    # torch.cuda.nvtx.range_push("PyTorch CUDA MatMul")
+    # sbvr_decoded_mat_mat_ab = mat_a_sbvr.decode() @ mat_b_sbvr.decode().T + bias
+    # torch.cuda.nvtx.range_pop()
+    # torch.cuda.nvtx.range_push("SBVR CUDA MatMul")
+    # sbvr_cuda_mat_mat_ab = sbvr.sbvr_mm_T(
+    #                             lhs_bvr, lhs_coeff_idx, lhs_coeff_cache,
+    #                             rhs_bvr, rhs_coeff_idx, rhs_coeff_cache,
+    #                             bias)
+    # torch.cuda.nvtx.range_pop()
+    # torch.cuda.profiler.cudart().cudaProfilerStop()
     
     if do_print:
         print_tensor(mat_a_sbvr.bvr, "mat_a_sbvr.bvr")
@@ -193,7 +212,6 @@ def sbvr_mat_mat_mult_test(mat_len=512, num_sums=6,
         print_tensor(mat_b_sbvr.coeff_idx, "mat_b_sbvr.coeff_idx")
         print_tensor(mat_b_sbvr.coeff_cache, "mat_b_sbvr.coeff_cache")
         print_tensor(mat_b_sbvr.decode(), "mat_b_sbvr")
-        print_tensor(mat_b_sbvr.decode().T, "mat_b_sbvr_T")
         print_tensor(sbvr_decoded_mat_mat_ab, "sbvr_decoded_mat_mat_ab")
         print_tensor(sbvr_cuda_mat_mat_ab, "sbvr_cuda_mat_mat_ab")
         
