@@ -30,14 +30,14 @@ torch::Tensor sbvr_mm_T(
                 torch::Tensor bias
             )
 {
-    int M = l_bvr.size(2);
-    int N = r_bvr.size(2);
-    int K = l_bvr.size(1);
-    assert (l_bvr.size(1) == r_bvr.size(1));
-    int l_num_sums = l_bvr.size(0) * l_bvr.size(3);
-    int r_num_sums = r_bvr.size(0) * r_bvr.size(3);
-    int l_cache_size = l_coeff_cache.size(0);
-    int r_cache_size = r_coeff_cache.size(0);
+    const int M = l_bvr.size(1);
+    const int N = r_bvr.size(1);
+    const int K = l_bvr.size(0);
+    const int l_num_sums = l_bvr.size(2);
+    const int r_num_sums = r_bvr.size(2);
+    const int l_cache_size = l_coeff_cache.size(0);
+    const int r_cache_size = r_coeff_cache.size(0);
+    assert (l_bvr.size(0) == r_bvr.size(0));
 
     auto out = torch::empty({M, N},
                          torch::dtype(torch::kFloat16).device(l_bvr.device()));

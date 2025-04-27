@@ -92,16 +92,16 @@ class _sbvr_serialized():
             raise ValueError(
                 _r_str(f"The BVR data type does not match - expected type " +
                       f"{self.bvr_dtype} but got {bvr.dtype}"))
-        if bvr.shape[0] * bvr.shape[3] != num_sums:
+        if bvr.shape[2] != num_sums:
             raise ValueError(
                 _r_str("The number of summations does not match the BVR, " +
                       f"expected {num_sums} but got " + 
-                      f"{bvr.shape[0] * bvr.shape[3]}"))
-        if bvr.shape[1] * bvr_num_bits != self.padded_data_shape[-1]:
+                      f"{bvr.shape[2]}"))
+        if bvr.shape[0] * bvr_num_bits != self.padded_data_shape[-1]:
             raise ValueError(
                 _r_str("The BVR inner dimension does not match the padded "+
                       f"data shape, expected {self.padded_data_shape[-1]} " +
-                      f"but got {bvr.shape[1] * bvr_num_bits}"))
+                      f"but got {bvr.shape[0] * bvr_num_bits}"))
         self.bvr = self._serialize_tensor(bvr)
         self.bvr_shape = bvr.shape
         self.bvr_dtype = bvr.dtype
@@ -374,15 +374,15 @@ class sbvr(torch.nn.Module):
     
     @torch.inference_mode()
     def _get_min_mse_coeff(self, data, search_matrix):
-        candidiate_matrix = search_matrix @ self._get_bin_combs().T
+        candidate_matrix = search_matrix @ self._get_bin_combs().T
         
-        n_ss_row = candidiate_matrix.shape[0]
-        n_ss_col = candidiate_matrix.shape[1]
+        n_ss_row = candidate_matrix.shape[0]
+        n_ss_col = candidate_matrix.shape[1]
         
         data = data.view(1, -1, 1)
-        candidiate_matrix = candidiate_matrix.view(n_ss_row, 1, n_ss_col) 
+        candidate_matrix = candidate_matrix.view(n_ss_row, 1, n_ss_col) 
         
-        diff = (data - candidiate_matrix)**2
+        diff = (data - candidate_matrix)**2
 
         diff_selected, coeff_comb_indices = diff.min(dim=-1) 
         mse = diff_selected.to(torch.float32).mean(dim=-1)
@@ -562,13 +562,9 @@ class sbvr(torch.nn.Module):
             out_coeff_sel[group_start:group_end] = coeff_sel
     
         bvr = self._change_coeff_sel_to_bvr(out_coeff_sel)
-        if self.num_sums % 2 != 0:
-            bvr = bvr.view(self.num_sums, 1, -1, 
-                    self._get_padded_data_shape()[-1] // 32)
-        else:
-            bvr = bvr.view(self.num_sums // 2, 2, -1, 
-                    self._get_padded_data_shape()[-1] // 32)
-        bvr = bvr.permute(0, 3, 2, 1).contiguous()
+        bvr = bvr.view(self.num_sums, -1, self._get_padded_data_shape()[-1] // \
+                                                self._get_bvr_num_bits())
+        bvr = bvr.permute(2, 1, 0).contiguous()
         self.bvr = torch.nn.Parameter(bvr, requires_grad=False)
         
         self.coeff_cache = \
@@ -576,7 +572,7 @@ class sbvr(torch.nn.Module):
         if enc_conf.num_coeff_cache_lines <= 256:
             self.coeff_idx = self.coeff_idx.to(torch.uint8)
         self.coeff_idx = \
-            self.coeff_idx.view(-1, self.bvr.shape[1] // \
+            self.coeff_idx.view(-1, self.bvr.shape[0] // \
                                 (self.bvr_len // self._get_bvr_num_bits()))
         self.coeff_idx = self.coeff_idx.transpose(0, 1).contiguous()
             
@@ -623,7 +619,7 @@ class sbvr(torch.nn.Module):
     @torch.inference_mode()
     def _change_bvr_to_coeff_sel(self):
         coeff_sel_len = self._get_padded_data_shape().numel()
-        bvr = self.bvr.permute(0, 3, 2, 1).contiguous().view(self.num_sums, -1)
+        bvr = self.bvr.permute(2, 1, 0).contiguous().view(self.num_sums, -1)
         bvr = bvr.view(self.num_sums, -1)
         num_bits = self._get_bvr_num_bits()
         powers = 2 ** torch.arange(num_bits, 

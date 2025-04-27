@@ -161,8 +161,8 @@ def sbvr_mat_mat_mult_test(mat_len=512, num_sums=6,
     #                       [0, 0, 0],
     #                       [0, 0, 0],], 
     #                     dtype=torch.float16, device=device)
-    mat_a = load_or_create_tensor("matrix_a", (mat_len, mat_len), device)
-    mat_b = load_or_create_tensor("matrix_b", (1, mat_len), device)
+    mat_a = load_or_create_tensor("matrix_a", (1, mat_len), device)
+    mat_b = load_or_create_tensor("matrix_b", (mat_len, mat_len), device)
     bias = torch.randn((mat_b.size(0),), dtype=torch.float16, device=device)*0.3
     mat_mat_ab = mat_a @ mat_b.T + bias
     if do_print:
@@ -223,7 +223,7 @@ def sbvr_mat_mat_mult_test(mat_len=512, num_sums=6,
     print_errors(mat_mat_ab, sbvr_cuda_mat_mat_ab)
     
 def sbvr_matmul_time_test(mat_len=512, sbvr_max_sums=6, 
-                          device=torch.device("cpu"), num_runs=1000):
+                          device=torch.device("cpu"), num_runs=10000):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     mat_a_size = (1, mat_len)
     mat_b_size = (mat_len, mat_len)
@@ -292,6 +292,6 @@ if __name__ == "__main__":
     
     # sbvr_randn_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_store_and_load_test(int(mat_len), int(sbvr_max_sums), device=device)
-    # sbvr_mat_mat_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
-    sbvr_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device)
+    sbvr_mat_mat_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
+    # sbvr_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device)
     # os.system(f"rm -rf {out_dir}")
