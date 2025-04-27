@@ -16,9 +16,80 @@
 #define BLOCK_TILE_SIZE 32
 
 template <int NUM_SUMS>
-struct bvrs {
-    int2 bvr[NUM_SUMS / 2];
+struct bvrs;
+
+template <>
+struct bvrs<2> {
+    int2 data;
+    __device__ __forceinline__ int get(int idx) const 
+    {
+        return idx == 0 ? data.x : data.y;
+    }
 };
+template <>
+struct bvrs<4> {
+    int4 data;
+    __device__ __forceinline__ int get(int idx) const 
+    {
+        if (idx == 0) return data.x;
+        else if (idx == 1) return data.y;
+        else if (idx == 2) return data.z;
+        else return data.w;
+    }
+};
+template <>
+struct bvrs<6> {
+    int2 data0;
+    int2 data1;
+    int2 data2;
+    __device__ __forceinline__ int get(int idx) const 
+    {
+        if (idx == 0) return data0.x;
+        else if (idx == 1) return data0.y;
+        else if (idx == 2) return data1.x;
+        else if (idx == 3) return data1.y;
+        else if (idx == 4) return data2.x;
+        else return data2.y;
+    }
+};
+template <>
+struct bvrs<8> {
+    int4 data0;
+    int4 data1;
+    __device__ __forceinline__ int get(int idx) const 
+    {
+        if (idx == 0) return data0.x;
+        else if (idx == 1) return data0.y;
+        else if (idx == 2) return data0.z;
+        else if (idx == 3) return data0.w;
+        else if (idx == 4) return data1.x;
+        else if (idx == 5) return data1.y;
+        else if (idx == 6) return data1.z;
+        else return data1.w;
+    }
+};
+template <>
+struct bvrs<10> {
+    int2 data0;
+    int2 data1;
+    int2 data2;
+    int2 data3;
+    int2 data4;
+    __device__ __forceinline__ int get(int idx) const 
+    {
+        if (idx == 0) return data0.x;
+        else if (idx == 1) return data0.y;
+        else if (idx == 2) return data1.x;
+        else if (idx == 3) return data1.y;
+        else if (idx == 4) return data2.x;
+        else if (idx == 5) return data2.y;
+        else if (idx == 6) return data3.x;
+        else if (idx == 7) return data3.y;
+        else if (idx == 8) return data4.x;
+        else return data4.y;
+    }
+};
+
 template <int NUM_SUMS>
 struct coeffs {
     __half2 coeff[NUM_SUMS / 2];
@@ -153,7 +224,8 @@ __global__ void cuda_1xtN_sbvr_mm_T(
             for (int bvr_idx = threadIdx.y; bvr_idx < bvr_per_K; 
                     bvr_idx += blockDim.y)
             {
-                int2 popc_cache [LNumSums / 2][RNumSums] = {};
+                // If all bits of l_bvr and r_bvr are set, this may overflow.
+                uchar4 popc_cache [LNumSums / 2][RNumSums / 2] = {};
                 #pragma unroll
                 for (int k = 0; k < K_PER_BVR; k++)
                 {
@@ -168,17 +240,14 @@ __global__ void cuda_1xtN_sbvr_mm_T(
                         #pragma unroll
                         for (int r_idx = 0; r_idx < RNumSums / 2; r_idx++)
                         {
-                            const uint32_t l_0 = l_bvrs.bvr[l_idx].x;
-                            const uint32_t l_1 = l_bvrs.bvr[l_idx].y;
-                            const uint32_t r_0 = r_bvrs.bvr[r_idx].x;
-                            const uint32_t r_1 = r_bvrs.bvr[r_idx].y;
-                            popc_cache[l_idx][r_idx * 2].x += __popc(l_0 & r_0);
-                                                
-                            popc_cache[l_idx][r_idx * 2].y += __popc(l_1 & r_1);
-                            popc_cache[l_idx][r_idx * 2 + 1].x += 
-                                                              __popc(l_0 & r_1);
-                            popc_cache[l_idx][r_idx * 2 + 1].y += 
-                                                              __popc(l_1 & r_0);
+                            const uint32_t l_0 = l_bvrs.get(l_idx * 2);
+                            const uint32_t l_1 = l_bvrs.get(l_idx * 2 + 1);
+                            const uint32_t r_0 = r_bvrs.get(r_idx * 2);
+                            const uint32_t r_1 = r_bvrs.get(r_idx * 2 + 1);
+                            popc_cache[l_idx][r_idx].x += __popc(l_0 & r_0);
+                            popc_cache[l_idx][r_idx].y += __popc(l_1 & r_1);
+                            popc_cache[l_idx][r_idx].w += __popc(l_0 & r_1);
+                            popc_cache[l_idx][r_idx].z += __popc(l_1 & r_0);
                         }
                     }
                 }
@@ -196,16 +265,16 @@ __global__ void cuda_1xtN_sbvr_mm_T(
                     {
                         const __half2 popc_h_0 = 
                             __halves2half2(
-                                __float2half(
-                                    (float)popc_cache[l_idx][r_idx * 2].x),
-                                __float2half(
-                                    (float)popc_cache[l_idx][r_idx * 2].y));
+                                __ushort2half_rd(
+                                    (ushort)popc_cache[l_idx][r_idx].x),
+                                __ushort2half_rd(
+                                    (ushort)popc_cache[l_idx][r_idx].y));
                         const __half2 popc_h_1 = 
                             __halves2half2(
-                                __float2half(
-                                    (float)popc_cache[l_idx][r_idx * 2 + 1].x),
-                                __float2half(
-                                    (float)popc_cache[l_idx][r_idx * 2 + 1].y));
+                                __ushort2half_rd(
+                                    (ushort)popc_cache[l_idx][r_idx].w),
+                                __ushort2half_rd(
+                                    (ushort)popc_cache[l_idx][r_idx].z));
                         const __half2 l_coeff = l_coeffs.coeff[l_idx];
                         const __half2 r_coeff = r_coeffs.coeff[r_idx];
                         const __half2 coeff_0 = __hmul2(l_coeff, r_coeff);
