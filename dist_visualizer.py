@@ -108,10 +108,10 @@ def get_coeff_search_space(data, num_sums):
     data_min = torch.min(data)
     data_90 = torch.quantile(data.to(torch.float), 0.7)
     
-    r_search_num = 100
+    r_search_num = 200
     
     r_max = math.pi*2/3
-    r_min = 1.0
+    r_min = 0.0
     r_gran = (r_max - r_min) / r_search_num 
         
     print(_b_str("\tNum_sums: ") + f"{num_sums}",

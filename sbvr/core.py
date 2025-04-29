@@ -355,8 +355,13 @@ class sbvr(torch.nn.Module):
     def _get_coeff_search_space_from_lists(self, r_list, b_list, s_list):
         exponents = torch.arange(self.num_sums, device=r_list.device) 
         search_space = r_list.unsqueeze(1) ** exponents.unsqueeze(0)
-        search_space = \
-            search_space / torch.sum(search_space, dim=1).unsqueeze(1)
+        if r_list[0].item() < 0:
+            max = search_space[:,0::2].sum(dim=1)
+            min = search_space[:,1::2].sum(dim=1)
+        else:
+            max = search_space.sum(dim=1)
+            min = 0
+        search_space = search_space / (max-min).unsqueeze(1)
         search_space = s_list.view(-1, 1, 1) * search_space.unsqueeze(0)
         search_space = b_list.view(-1, 1, 1, 1) + search_space.unsqueeze(0)
         search_space = search_space.view(-1, self.num_sums)
@@ -368,22 +373,29 @@ class sbvr(torch.nn.Module):
         data_max = torch.max(data)
         data_avg = torch.mean(data)
         data_min = torch.min(data)
-        data_90 = torch.quantile(data.to(torch.float), 0.7)
+        data_95 = torch.quantile(data.to(torch.float), 0.95)
 
-        r_max = math.pi*2/3
-        r_min = 0.0
-        r_gran = (r_max - r_min) / enc_conf.r_search_num 
-        b_max = abs(data_avg) * 14.0 / self.num_sums 
+        r0_min = math.pi/6
+        r0_max = 0.94
+        r0_gran = (r0_max - r0_min) / (enc_conf.r_search_num / 2) 
+
+        r1_max = math.pi*2/3
+        r1_min = 1.06
+        r1_gran = (r1_max - r1_min) / (enc_conf.r_search_num / 2) 
+        b_max = abs(data_avg) * 2.0 / self.num_sums 
+        if b_max < 0.3:
+            b_max = 0.3
         b_min = -b_max
         b_gran = (b_max - b_min) / enc_conf.b_search_num 
-        s_max = ((data_max - data_min) / 2.0) * 1.2 
-        s_min = 0.0
+        s_max = (data_max - data_min) * 1.1 
+        s_min = 2 * data_95
         s_gran = (s_max - s_min) / enc_conf.s_search_num 
         
         if extended:
             if self.verbose_level > 1:
                 print (_r_str("\tUsing extended search space..."))
-            r_gran /= enc_conf.extend_ratio
+            r0_gran /= enc_conf.extend_ratio
+            r1_gran /= enc_conf.extend_ratio
             b_gran /= enc_conf.extend_ratio
             s_gran /= enc_conf.extend_ratio
             
@@ -392,9 +404,12 @@ class sbvr(torch.nn.Module):
                     ", " + _y_str("Data range: ") + 
                     f"{data_min:.4e} to {data_max:.4e}" +
                     ", " + _y_str("avg: ") + f"{data_avg:.4e}")
-            print(_y_str("\t\tR search range: ") + 
-                  f"{r_min:.4e} to {r_max:.4e}, " +
-                _y_str("search granularity: ") + f"{r_gran:.4e}")
+            print(_y_str("\t\tR0 search range: ") + 
+                  f"{r0_min:.4e} to {r0_max:.4e}, " +
+                _y_str("search granularity: ") + f"{r0_gran:.4e}")
+            print(_y_str("\t\tR1 search range: ") + 
+                  f"{r1_min:.4e} to {r1_max:.4e}, " +
+                _y_str("search granularity: ") + f"{r1_gran:.4e}")
             print(_y_str("\t\tBias search range: ") + 
                 f"{b_min:.4e} to {b_max:.4e}, " +
                 _y_str("search granularity: ") + f"{b_gran:.4e}")
@@ -402,8 +417,11 @@ class sbvr(torch.nn.Module):
                 f"{s_min:.4e} to {s_max:.4e}, " +
                 _y_str("search granularity: ") + f"{s_gran:.4e}")
         
-        r_list = -torch.arange(r_min + r_gran, r_max + r_gran, r_gran, 
+        r0_list = -torch.arange(r0_min + r0_gran, r0_max + r0_gran, r0_gran, 
                               device=data.device, dtype=data.dtype)
+        r1_list = -torch.arange(r1_min + r1_gran, r1_max + r1_gran, r1_gran, 
+                              device=data.device, dtype=data.dtype)
+        r_list = torch.cat((r0_list, r1_list))
         if s_gran != 0:
             s_list = torch.arange(s_min + s_gran, s_max + s_gran, s_gran, 
                                 device=data.device, dtype=data.dtype)
@@ -476,7 +494,7 @@ class sbvr(torch.nn.Module):
             window_size = min(len(enc_conf.mse_history), 
                               enc_conf.mse_window_size)
             mse_window = enc_conf.mse_history[-window_size:]
-            cutoff_mse = (sum(mse_window) / len(mse_window))
+            cutoff_mse = (sum(mse_window) / len(mse_window))*0.99
             if cutoff_mse < enc_conf.acceptable_mse:
                 cutoff_mse = enc_conf.acceptable_mse
 
