@@ -52,6 +52,62 @@ def create_sbvr(tensor, name, shape, device, num_sums, verbose_level=0):
     sbvr_tensor.save(file_path)
     return sbvr_tensor
 
+def float_to_fp4_e3m0(x):
+    x_clamped = torch.clamp(x, -16.0, 16.0)  # Representable range
+    sign = (x_clamped < 0).to(torch.uint8)
+
+    # Prevent log2(0) by flooring to a small positive number
+    x_abs = x_clamped.abs()
+    x_abs = torch.clamp(x_abs, min=1e-8)
+
+    # Compute exponent (bias = 3), round to nearest integer
+    exp_unbiased = torch.round(torch.log2(x_abs))
+    exp_clamped = exp_unbiased.clamp(-3, 4)
+    exp_q = (exp_clamped + 3).to(torch.uint8)  # bias = 3 → encoded in 3 bits
+
+    # Encode as 4-bit value: [sign | exponent (3 bits)]
+    fp4 = (sign << 3) | exp_q
+    return fp4.to(torch.uint8)
+
+def fp4_e3m0_to_float(fp4):
+    sign = (fp4 >> 3) & 0b1
+    exp_q = fp4 & 0b111  # 3-bit exponent
+    exponent = exp_q.to(torch.int32) - 3  # bias = 3
+    value = 2.0 ** exponent
+    return torch.where(sign.bool(), -value, value)
+
+def float_to_fp4_e2m1(x):
+    x_clamped = torch.clamp(x, -6.0, 6.0)  # Only representable range
+    sign = (x_clamped < 0).to(torch.uint8)
+    x_abs = x_clamped.abs()
+
+    # Prevent log2(0) → set small floor
+    x_abs = torch.clamp(x_abs, min=1e-8)
+
+    # Compute exponent (bias = 1)
+    exp_unbiased = torch.floor(torch.log2(x_abs))
+    exp_clamped = exp_unbiased.clamp(-1, 2)
+    exp_q = (exp_clamped + 1).to(torch.uint8)
+
+    # Reconstruct base value (without mantissa)
+    base = 2.0 ** exp_clamped
+
+    # Decide mantissa: if closer to base * 1.5 than base, set mantissa = 1
+    mantissa = ((x_abs >= base * 1.25)).to(torch.uint8)
+
+    # Combine to 4-bit format: [sign | exponent (2) | mantissa]
+    fp4 = (sign << 3) | (exp_q << 1) | mantissa
+    return fp4.to(torch.uint8)
+
+def fp4_e2m1_to_float(fp4):
+    sign = (fp4 >> 3) & 0b1
+    exp_q = (fp4 >> 1) & 0b11
+    mantissa = fp4 & 0b1
+
+    exponent = exp_q.to(torch.int32) - 1  # bias = 1
+    base = 2.0 ** exponent
+    value = base * (1.0 + 0.5 * mantissa)
+    return torch.where(sign.bool(), -value, value)
 
 def get_errors(tensor1, tensor2):
     if tensor1.shape != tensor2.shape:
@@ -105,8 +161,16 @@ def sbvr_randn_test(mat_len=512, sbvr_max_sums=6, device=torch.device("cpu")):
                             mat_b.T.to(torch.bfloat16))
     mat_c_e4m3fn = f64_matmul(mat_a.to(torch.float8_e4m3fn), 
                               mat_b.T.to(torch.float8_e4m3fn))
+    mat_c_e4m3fnuz = f64_matmul(mat_a.to(torch.float8_e4m3fnuz), 
+                              mat_b.T.to(torch.float8_e4m3fnuz))
     mat_c_e5m2 = f64_matmul(mat_a.to(torch.float8_e5m2), 
                             mat_b.T.to(torch.float8_e5m2))
+    mat_c_e5m2fnuz = f64_matmul(mat_a.to(torch.float8_e5m2fnuz),
+                            mat_b.T.to(torch.float8_e5m2fnuz))
+    mat_c_e2m1 = f64_matmul(fp4_e2m1_to_float(float_to_fp4_e2m1(mat_a)),
+                            fp4_e2m1_to_float(float_to_fp4_e2m1(mat_b.T)))
+    mat_c_e3m0 = f64_matmul(fp4_e3m0_to_float(float_to_fp4_e3m0(mat_a)),
+                            fp4_e3m0_to_float(float_to_fp4_e3m0(mat_b.T)))
     time_dict = {}
     sbvr_dict = {}
     for i in range (sbvr_max_sums, 1, -2):
@@ -125,8 +189,16 @@ def sbvr_randn_test(mat_len=512, sbvr_max_sums=6, device=torch.device("cpu")):
     print_errors(mat_c_16, mat_c_bf16)
     print(b_str("Case 2: Conversion to " + "float8_e4m3fn"))
     print_errors(mat_c_16, mat_c_e4m3fn)
-    print(b_str("Case 3: Conversion to " + "float8_e5m2"))
+    print(b_str("Case 3: Conversion to " + "float8_e4m3fnuz"))
+    print_errors(mat_c_16, mat_c_e4m3fnuz)
+    print(b_str("Case 4: Conversion to " + "float8_e5m2"))
     print_errors(mat_c_16, mat_c_e5m2)
+    print(b_str("Case 5: Conversion to " + "float8_e5m2fnuz"))
+    print_errors(mat_c_16, mat_c_e5m2fnuz)
+    print(b_str("Case 6: Conversion to " + "float4_e2m1"))
+    print_errors(mat_c_16, mat_c_e2m1)
+    print(b_str("Case 7: Conversion to " + "float4_e3m0"))
+    print_errors(mat_c_16, mat_c_e3m0)
     for i, (key, value) in enumerate(sbvr_dict.items()):
         print(b_str(f"Case {i+4}: Conversion to " + f"SBVR {key} bits"))
         print_errors(mat_c_16, value)
