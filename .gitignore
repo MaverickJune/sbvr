@@ -8,12 +8,14 @@ dummy/
 build/
 dist/
 data/
+histograms/
 *.egg-info/
 *.txt
 *.pt
 *.pyc
 *.so
 *.zip
+*.png
 
 Llama-3.2-1B-gptq-4bit/
 sbvr_models/

@@ -368,9 +368,10 @@ class sbvr(torch.nn.Module):
         data_max = torch.max(data)
         data_avg = torch.mean(data)
         data_min = torch.min(data)
+        data_90 = torch.quantile(data.to(torch.float), 0.7)
 
-        r_max = (math.pi*2/3 + 0.1)
-        r_min = 1.0
+        r_max = math.pi*2/3
+        r_min = 0.0
         r_gran = (r_max - r_min) / enc_conf.r_search_num 
         b_max = abs(data_avg) * 14.0 / self.num_sums 
         b_min = -b_max
