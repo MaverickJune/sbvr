@@ -29,13 +29,13 @@ Tensor 2: Mean: 2.7214e-03, ABS Mean: 1.8094e+00, Max: 1.0906e+01, Min: -1.0641e
 Errors:   MSE:  5.4845e-01, ABS Mean: 5.8952e-01, Max: 3.3874e+00, Min: -3.6742e+00, Std. Dev.: 7.4057e-01
 Case 4: Conversion to SBVR 10 bits
 Tensor 1: Mean: 4.9354e-03, ABS Mean: 1.6232e+00, Max: 8.9724e+00, Min: -9.4311e+00, Std. Dev.: 2.0362e+00
-Tensor 2: Mean: 5.9509e-03, ABS Mean: 1.6230e+00, Max: 8.9688e+00, Min: -9.4062e+00, Std. Dev.: 2.0371e+00
-Errors:   MSE:  3.8083e-04, ABS Mean: 1.5470e-02, Max: 8.9521e-02, Min: -1.0053e-01, Std. Dev.: 1.9489e-02
+Tensor 2: Mean: 4.9324e-03, ABS Mean: 1.6230e+00, Max: 8.9688e+00, Min: -9.4297e+00, Std. Dev.: 2.0371e+00
+Errors:   MSE:  3.5982e-05, ABS Mean: 4.7853e-03, Max: 2.6519e-02, Min: -3.0472e-02, Std. Dev.: 5.9985e-03
         Time taken: 1153.6845 seconds
 Case 5: Conversion to SBVR 8 bits
 Tensor 1: Mean: 4.9354e-03, ABS Mean: 1.6232e+00, Max: 8.9724e+00, Min: -9.4311e+00, Std. Dev.: 2.0362e+00
-Tensor 2: Mean: 4.5204e-03, ABS Mean: 1.6230e+00, Max: 8.9609e+00, Min: -9.4375e+00, Std. Dev.: 2.0352e+00
-Errors:   MSE:  6.9696e-04, ABS Mean: 2.1018e-02, Max: 1.2018e-01, Min: -1.1585e-01, Std. Dev.: 2.6397e-02
+Tensor 2: Mean: 4.9934e-03, ABS Mean: 1.6230e+00, Max: 8.9688e+00, Min: -9.4219e+00, Std. Dev.: 2.0352e+00
+Errors:   MSE:  4.5657e-04, ABS Mean: 1.7032e-02, Max: 9.1993e-02, Min: -9.2724e-02, Std. Dev.: 2.1367e-02
         Time taken: 541.2264 seconds
 Case 4: Conversion to SBVR 7 bits
 Tensor 1: Mean: 4.9354e-03, ABS Mean: 1.6232e+00, Max: 8.9724e+00, Min: -9.4311e+00, Std. Dev.: 2.0362e+00
@@ -44,8 +44,8 @@ Errors:   MSE:  1.6870e-03, ABS Mean: 3.2768e-02, Max: 1.8502e-01, Min: -1.8754e
         Time taken: 347.2716 seconds
 Case 4: Conversion to SBVR 6 bits
 Tensor 1: Mean: 4.9354e-03, ABS Mean: 1.6232e+00, Max: 8.9724e+00, Min: -9.4311e+00, Std. Dev.: 2.0362e+00
-Tensor 2: Mean: 5.8060e-03, ABS Mean: 1.6230e+00, Max: 8.9219e+00, Min: -9.3906e+00, Std. Dev.: 2.0352e+00
-Errors:   MSE:  5.6865e-03, ABS Mean: 6.0185e-02, Max: 3.3705e-01, Min: -3.6020e-01, Std. Dev.: 7.5404e-02
+Tensor 2: Mean: 5.2376e-03, ABS Mean: 1.6230e+00, Max: 8.9375e+00, Min: -9.3516e+00, Std. Dev.: 2.0352e+00
+Errors:   MSE:  5.3155e-03, ABS Mean: 5.8198e-02, Max: 3.2338e-01, Min: -3.4653e-01, Std. Dev.: 7.2907e-02
         Time taken: 116.3187 seconds
 Case 5: Conversion to SBVR 5 bits
 Tensor 1: Mean: 4.9354e-03, ABS Mean: 1.6232e+00, Max: 8.9724e+00, Min: -9.4311e+00, Std. Dev.: 2.0362e+00
@@ -54,8 +54,8 @@ Errors:   MSE:  1.9993e-02, ABS Mean: 1.1275e-01, Max: 6.9494e-01, Min: -6.2016e
         Time taken: 100.7353 seconds
 Case 5: Conversion to SBVR 4 bits
 Tensor 1: Mean: 4.9354e-03, ABS Mean: 1.6232e+00, Max: 8.9724e+00, Min: -9.4311e+00, Std. Dev.: 2.0362e+00
-Tensor 2: Mean: 4.9667e-03, ABS Mean: 1.6113e+00, Max: 9.1719e+00, Min: -9.2500e+00, Std. Dev.: 2.0215e+00
-Errors:   MSE:  7.1325e-02, ABS Mean: 2.1290e-01, Max: 1.1774e+00, Min: -1.2371e+00, Std. Dev.: 2.6707e-01
+Tensor 2: Mean: 5.0964e-03, ABS Mean: 1.6113e+00, Max: 9.1328e+00, Min: -9.2344e+00, Std. Dev.: 2.0215e+00
+Errors:   MSE:  7.1025e-02, ABS Mean: 2.1248e-01, Max: 1.1774e+00, Min: -1.2640e+00, Std. Dev.: 2.6651e-01
         Time taken: 31.0031 seconds
 Case 6: Conversion to SBVR 3 bits
 Tensor 1: Mean: 4.9354e-03, ABS Mean: 1.6232e+00, Max: 8.9724e+00, Min: -9.4311e+00, Std. Dev.: 2.0362e+00
@@ -64,8 +64,8 @@ Errors:   MSE:  2.6859e-01, ABS Mean: 4.1309e-01, Max: 2.5846e+00, Min: -2.3164e
         Time taken: 23.8090 seconds
 Case 6: Conversion to SBVR 2 bits
 Tensor 1: Mean: 4.9354e-03, ABS Mean: 1.6232e+00, Max: 8.9724e+00, Min: -9.4311e+00, Std. Dev.: 2.0362e+00
-Tensor 2: Mean: 3.9864e-03, ABS Mean: 1.4316e+00, Max: 8.5391e+00, Min: -8.4609e+00, Std. Dev.: 1.7959e+00
-Errors:   MSE:  1.0014e+00, ABS Mean: 7.9860e-01, Max: 4.3811e+00, Min: -4.4001e+00, Std. Dev.: 1.0007e+00
+Tensor 2: Mean: 4.3030e-03, ABS Mean: 1.4316e+00, Max: 8.5469e+00, Min: -8.4609e+00, Std. Dev.: 1.7959e+00
+Errors:   MSE:  1.0013e+00, ABS Mean: 7.9856e-01, Max: 4.3850e+00, Min: -4.3972e+00, Std. Dev.: 1.0006e+00
         Time taken: 7.3325 seconds
 
 Matrix A Size: (1, 16384), Matrix B Size: (16384, 16384)

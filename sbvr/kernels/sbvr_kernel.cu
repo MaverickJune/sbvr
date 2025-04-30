@@ -218,7 +218,7 @@ __global__ void cuda_1xtN_sbvr_mm_T(
     {
         const int n = (tblock_id / M) * TileN + threadIdx.x;
         const int m = (tblock_id % M);
-        __half2 sum = __float2half2_rn(0.0f);
+        float sum = 0.0f;
         if (n < N)
         {
             for (int bvr_idx = threadIdx.y; bvr_idx < bvr_per_K; 
@@ -246,8 +246,8 @@ __global__ void cuda_1xtN_sbvr_mm_T(
                             const uint32_t r_1 = r_bvrs.get(r_idx * 2 + 1);
                             popc_cache[l_idx][r_idx].x += __popc(l_0 & r_0);
                             popc_cache[l_idx][r_idx].y += __popc(l_1 & r_1);
-                            popc_cache[l_idx][r_idx].w += __popc(l_0 & r_1);
-                            popc_cache[l_idx][r_idx].z += __popc(l_1 & r_0);
+                            popc_cache[l_idx][r_idx].z += __popc(l_0 & r_1);
+                            popc_cache[l_idx][r_idx].w += __popc(l_1 & r_0);
                         }
                     }
                 }
@@ -281,27 +281,24 @@ __global__ void cuda_1xtN_sbvr_mm_T(
                         const __half2 coeff_1 =
                             __hmul2(l_coeff, 
                                         __halves2half2(__high2half(r_coeff), 
-                                                       __low2half(r_coeff)));        
-                        sum = __hfma2(coeff_0, popc_h_0, sum);
-                        sum = __hfma2(coeff_1, popc_h_1, sum);
-
+                                                       __low2half(r_coeff)));
+                        const __half2 mult_sum = __hfma2(coeff_0, popc_h_0, 
+                                                    __hmul2(coeff_1, popc_h_1));                               
+                        sum += __half2float(mult_sum.x) + 
+                               __half2float(mult_sum.y);
                     }
                 }
             }
         }
         #pragma unroll
         for (int i = (THREAD_PER_WARP / TileN) / 2; i > 0; i /= 2)
-        {
-            __half2 rec = __shfl_down_sync(0xFFFFFFFF, 
-                                         sum, i * TileN);
-            sum = __hadd2(sum, rec);
-        }
+            sum += __shfl_down_sync(0xFFFFFFFF, sum, i * TileN);
+
         if (threadIdx.y == 0 && n < N)
         {
             __half bias_val = (bias != nullptr ? bias[n] : __float2half(0.0f));
-            sum.x = __hadd(sum.x, sum.y);  
-            sum.x = __hadd(sum.x, bias_val); 
-            out[m * N + n] = sum.x; 
+            bias_val = __hadd(__float2half(sum), bias_val);  
+            out[m * N + n] = bias_val; 
         }
     }
 }
