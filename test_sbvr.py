@@ -390,6 +390,6 @@ if __name__ == "__main__":
     # sbvr_randn_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_store_and_load_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_mat_mat_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
-    sbvr_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device)
-    # sbvr_online_test(int(mat_len), int(sbvr_max_sums), device=device)
+    # sbvr_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device)
+    sbvr_online_test(int(mat_len), int(sbvr_max_sums), device=device)
     # os.system(f"rm -rf {out_dir}")

@@ -1,8 +1,3 @@
-
-#include <cutlass/gemm/device/gemm.h>
-#include <cutlass/layout/matrix.h>
-#include <cutlass/arch/mma.h>
-#include <cutlass/arch/wmma.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <iostream>
