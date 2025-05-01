@@ -35,25 +35,6 @@ class sbvr(torch.nn.Module):
                 bvr, coeff_idx, coeff_cache, self.input_num_sums, \
                                 input_coeff = serialized.deserialize_sbvr()
                 
-            if enforce_bvr_len is not None and \
-                self.bvr_len != enforce_bvr_len:
-                raise ValueError(
-                    r_str("bvr length does not match the enforced value, " +
-                          f"expected {enforce_bvr_len} but got " +
-                          f"{self.bvr_len}"))
-            if enforce_compute_dtype is not None and \
-                self.compute_dtype != enforce_compute_dtype:
-                raise ValueError(
-                    r_str("Compute data type does not match the enforced " +
-                          f"value, expected {enforce_compute_dtype} but got " +
-                          f"{self.compute_dtype}"))
-            if enforce_bvr_dtype is not None and \
-                self.bvr_dtype != enforce_bvr_dtype:
-                raise ValueError(
-                    r_str("BVR data type does not match the enforced value, " +
-                          f"expected {enforce_bvr_dtype} but got " +
-                          f"{self.bvr_dtype}"))
-                
             self.bvr = torch.nn.Parameter(bvr.to(_device), requires_grad=False)
             self.coeff_idx = torch.nn.Parameter(coeff_idx.to(_device), 
                                                 requires_grad=False)
@@ -176,13 +157,12 @@ class sbvr(torch.nn.Module):
             print(self.encoder._get_conf_str())
         
         if self.verbose_level > -1:
-            group_iter = tqdm(range(data_padded.shape[0]), ncols=80, 
+            group_iter = tqdm(range(self.coeff_idx.shape[0]), ncols=80, 
                       desc=b_str("Encoding SBVR groups"), unit="g")
         else:
-            group_iter = range(data_padded.shape[0])
+            group_iter = range(self.coeff_idx.shape[0])
         
         for i in group_iter:
-            torch.cuda.empty_cache()
             group_data = data_padded.flatten()[i * self.bvr_len: 
                                                 (i + 1) * self.bvr_len]
             self.iterative_encoding(group_data, i)
@@ -190,11 +170,13 @@ class sbvr(torch.nn.Module):
         self.finalize_encoding()
         
     def iterative_encoding(self, data, idx):
+        torch.cuda.empty_cache()
         coeff_idx, coeff_sel = self.encoder.encode_data(data)
         self.coeff_idx[idx] = coeff_idx
         self.coeff_sel[idx * self.bvr_len:(idx + 1) * self.bvr_len] = coeff_sel
         all_points = self._get_all_points(self.encoder.coeff_cache[coeff_idx])
         decoded_data = all_points[coeff_sel]
+        # print(f"Decoded data: {decoded_data}")
         return decoded_data
             
     def finalize_encoding(self):

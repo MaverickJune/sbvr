@@ -1,4 +1,5 @@
-from .core import (sbvr, sbvr_serialized, load, mm_T)
+from .core import sbvr, load, mm_T
+from .utils import sbvr_serialized
 from sbvr.sbvr_cuda import _sbvr_cuda_init, _sbvr_mm_T
 import torch
 
