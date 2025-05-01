@@ -48,6 +48,9 @@ def convert_compressed_sbvr_weights_to_model(compressed_weight_path:str = None,
         gc.collect()
         print(_g_str(f"Decompressed model saved to {save_dir_path}"))
         
+        weight_dir_path = None
+        save_dir_path = None
+        
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--compressed_weight_path", type=str, required=True, default="./compressed_weights",
