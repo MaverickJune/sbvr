@@ -8,7 +8,7 @@
 # nnodes determines the number of GPU nodes to utilize (usually 1 for an 8 GPU node)
 # nproc_per_node indicates the number of GPUs per node to employ.
 mkdir -p quantized_model
-name=$(basename $1)
+name=$(echo $1 | sed 's|/|_|g')
 torchrun --nnodes=1 --nproc_per_node=$5 ptq.py \
 --input_model $1 \
 --do_train False \

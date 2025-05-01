@@ -54,17 +54,6 @@ def ptq_model(args, model, model_args=None):
             print("Load quantized model from ", args.load_qmodel_path)
             save_dict = torch.load(args.load_qmodel_path)
             model.load_state_dict(save_dict["model"])
-        elif args.w_sbvr:
-            trainloader = data_utils.get_wikitext2(
-                nsamples=args.nsamples,
-                seed=args.seed,
-                model=model_args.input_model,
-                seqlen=2048,
-                eval_mode=False,
-            )
-            # quantize other layers with gptq
-            quantizers = gptq_utils.gptq_fwrd(model, trainloader, "cuda", args)
-            save_dict["w_quantizers"] = quantizers
         elif not args.w_rtn:  # GPTQ Weight Quantization
             trainloader = data_utils.get_wikitext2(
                 nsamples=args.nsamples,

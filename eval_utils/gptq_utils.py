@@ -55,10 +55,6 @@ class GPTQ:
     ):
         W = self.layer.weight.data.clone()
         W = W.float()
-        Scale = self.layer.weight.data.clone()
-        Scale = Scale.float()
-        W_int = self.layer.weight.data.clone()
-        W_int = W_int.float()
 
         tick = time.time()
 
@@ -70,8 +66,13 @@ class GPTQ:
         dead = torch.diag(H) == 0
         H[dead, dead] = 1
         W[:, dead] = 0
+        
+        if isinstance(self.quantizer, sbvr):
+            use_sbvr = True
+        else:
+            use_sbvr = False
 
-        if static_groups:
+        if static_groups and use_sbvr is False:
             groups = []
             for i in range(0, self.columns, groupsize):
                 quantizer = copy.deepcopy(self.quantizer)
@@ -101,8 +102,6 @@ class GPTQ:
 
             W1 = W[:, i1:i2].clone()
             Q1 = torch.zeros_like(W1)
-            W_int1 = torch.zeros_like(W1)
-            Scale1 = torch.zeros_like(W1).to(Scale.dtype)
             Err1 = torch.zeros_like(W1)
             Losses1 = torch.zeros_like(W1)
             Hinv1 = Hinv[i1:i2, i1:i2]
@@ -123,11 +122,9 @@ class GPTQ:
                             idx = perm[idx]
                         self.quantizer = groups[idx // groupsize]
 
-                q, int_weight, scale = self.quantizer.fake_quantize(w.unsqueeze(1))
-                Q1[:, i] = q.flatten()
+                q, _, _ = self.quantizer.fake_quantize(w.unsqueeze(1))
                 q = q.flatten()
-                W_int1[:, i] = int_weight.flatten()
-                Scale1[:, i] = scale.flatten()
+                Q1[:, i] = q
 
                 Losses1[:, i] = (w - q) ** 2 / d**2
 
@@ -136,8 +133,6 @@ class GPTQ:
                 Err1[:, i] = err1
 
             Q[:, i1:i2] = Q1
-            W_int[:, i1:i2] = W_int1
-            Scale[:, i1:i2] = Scale1
             Losses[:, i1:i2] = Losses1 / 2
 
             W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
@@ -146,12 +141,6 @@ class GPTQ:
 
         if actorder:
             Q = Q[:, invperm]
-
-        if export_to_et:
-            self.layer.register_buffer(
-                "int_weight", W_int.reshape(self.layer.weight.shape)
-            )
-            self.layer.register_buffer("scale", Scale)
         self.layer.weight.data = Q.reshape(self.layer.weight.shape).to(
             self.layer.weight.data.dtype
         )
@@ -252,13 +241,16 @@ def gptq_fwrd(model, dataloader, dev, args):
                 if args.int8_down_proj and "down_proj" in name:
                     layer_weight_bits = 8
                 gptq[name] = GPTQ(subset[name])
-                gptq[name].quantizer = quant_utils.WeightQuantizer()
-                gptq[name].quantizer.configure(
-                    layer_weight_bits,
-                    perchannel=True,
-                    sym=layer_weight_sym,
-                    mse=args.w_clip,
-                )
+                if args.w_sbvr:
+                    gptq[name].quantizer = sbvr()
+                else:
+                    gptq[name].quantizer = quant_utils.WeightQuantizer()
+                    gptq[name].quantizer.configure(
+                        layer_weight_bits,
+                        perchannel=True,
+                        sym=layer_weight_sym,
+                        mse=args.w_clip,
+                    )
 
             def add_batch(name):
                 def tmp(_, inp, out):
