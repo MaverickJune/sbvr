@@ -21,6 +21,39 @@ import tqdm
 from sbvr import sbvr
 from utils import quant_utils, utils
 
+class sbvr_wrapper(sbvr):
+    def __init__(self,
+                 encoder_config,
+                 verbose):
+        super().__init__(encoder_config=encoder_config, verbose_level=verbose)
+        self.scale = None
+        self.zero_point = None
+        self.int_weight = None
+
+    def configure(self):
+        return
+    
+    def find_params(self, x):
+        self.prepare_encoding(x)
+        return
+    
+    def fake_quantize(self, x):
+        if not hasattr(self, "bvr_idx"):
+            self.bvr_idx = 0
+        q = torch.zeros_like(x.flatten())
+        for i in range(0, x.shape[0], self.bvr_len):
+            segment = x[i:i + self.bvr_len]
+            q[i:i + self.bvr_len] = \
+                self.iterative_encoding(segment.flatten(), self.bvr_idx)
+            self.bvr_idx += 1
+        return q, None, None
+    
+    def enabled(self):
+        return self.coeff_cache is not None
+
+    def ready(self):
+        return self.coeff_cache is not None
+
 
 class GPTQ:
     def __init__(self, layer):
@@ -242,7 +275,10 @@ def gptq_fwrd(model, dataloader, dev, args):
                     layer_weight_bits = 8
                 gptq[name] = GPTQ(subset[name])
                 if args.w_sbvr:
-                    gptq[name].quantizer = sbvr()
+                    gptq[name].quantizer = sbvr_wrapper(encoder_config={
+                        "num_sums": layer_weight_bits,
+                        "bvr_len": 128,
+                    }, verbose=1)
                 else:
                     gptq[name].quantizer = quant_utils.WeightQuantizer()
                     gptq[name].quantizer.configure(
@@ -279,6 +315,8 @@ def gptq_fwrd(model, dataloader, dev, args):
                     static_groups=False,
                     export_to_et=args.export_to_et,
                 )
+                if args.w_sbvr:
+                    gptq[name].quantizer.finalize_encoding()
                 quantizers["model.layers.%d.%s" % (i, name)] = gptq[name].quantizer
                 gptq[name].free()
 

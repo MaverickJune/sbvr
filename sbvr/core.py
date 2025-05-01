@@ -50,11 +50,10 @@ class sbvr(torch.nn.Module):
                 encoder_config = {} 
             self.encoder = sbvr_encoder(**encoder_config)
             self.encoder.verbose_level = verbose_level
-            self.encoder.compute_dtype = torch.float16
             self.num_sums = self.encoder.num_sums
-            self.bvr_len = 256
-            self.compute_dtype =  torch.float16
-            self.bvr_dtype = torch.uint32
+            self.bvr_len = self.encoder.bvr_len
+            self.compute_dtype = self.encoder.compute_dtype
+            self.bvr_dtype = self.encoder.bvr_dtype
             if self.num_sums > 11 and self.compute_dtype == torch.float16:
                 raise UserWarning(
                     r_str("Warning: compute_dtype float16 does not have "
@@ -115,6 +114,7 @@ class sbvr(torch.nn.Module):
         return coeff @ self.bin_combs.T
     
     def prepare_encoding(self, data):
+        print (r_str("Preparing SBVR encoding: ") + str(data.shape))
         self.original_dtype = data.dtype
         self.original_data_shape = data.shape
                 
@@ -131,7 +131,8 @@ class sbvr(torch.nn.Module):
         # Pad the data to the nearest multiple of bvr_len
         if self.original_data_shape != self._get_padded_data_shape():
             data_padded = torch.zeros(self._get_padded_data_shape(), 
-                                      dtype=data.dtype, device=data.device)
+                                      dtype=self.compute_dtype, 
+                                      device=data.device)
             slices = tuple(slice(0, s) for s in data.shape)
             data_padded[slices] = data
         else:
@@ -171,7 +172,8 @@ class sbvr(torch.nn.Module):
         
     def iterative_encoding(self, data, idx):
         torch.cuda.empty_cache()
-        coeff_idx, coeff_sel = self.encoder.encode_data(data)
+        coeff_idx, coeff_sel = \
+                self.encoder.encode_data(data.to(self.compute_dtype))
         self.coeff_idx[idx] = coeff_idx
         self.coeff_sel[idx * self.bvr_len:(idx + 1) * self.bvr_len] = coeff_sel
         all_points = self._get_all_points(self.encoder.coeff_cache[coeff_idx])
@@ -323,28 +325,6 @@ class sbvr(torch.nn.Module):
             str(self.input_coeff.shape if self.input_coeff is not None 
                 else "Input Coefficient not set") 
         return info_str
-    
-    def configure(
-        self,
-        bits,
-        perchannel: bool = False,
-        sym: bool = True,
-        mse: bool = False,
-        norm: float = 2.4,
-        grid: int = 100,
-        maxshrink: float = 0.8,
-        weight_groupsize: int = -1,
-    ):
-        # For compatibility with Spinquant APIs
-        return
-    
-    def find_params(self, x):
-        # For compatibility with Spinquant APIs
-        return
-    
-    def fake_quantize(self, x):
-        # For compatibility with Spinquant APIs
-        return x
     
 def mm_T(lhs, rhs, bias):
     lhs_bvr = lhs.bvr

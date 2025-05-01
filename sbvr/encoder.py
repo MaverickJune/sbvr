@@ -8,6 +8,8 @@ from .utils import g_str, y_str, b_str, r_str
 class sbvr_encoder():
     def __init__(self, **kwargs):
         self.num_sums = kwargs.get("num_sums", 4)
+        self.bvr_len = kwargs.get("bvr_len", 256)
+        self.bvr_dtype = kwargs.get("bvr_dtype", torch.uint32)
         self.r_search_num = kwargs.get("r_search_num", 64)
         self.b_search_num = kwargs.get("b_search_num", 40)
         self.s_search_num = kwargs.get("s_search_num", 40)
