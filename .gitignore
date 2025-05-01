@@ -4,7 +4,6 @@ quantized_model/
 .vscode/
 build/
 *__pycache__/
-
 *.so
 *.pyc
 *.egg

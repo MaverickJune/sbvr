@@ -34,7 +34,7 @@ class sbvr_wrapper(sbvr):
         return
     
     def find_params(self, x):
-        self.prepare_encoding(x)
+        self.prepare_encoding(x.T)
         return
     
     def fake_quantize(self, x):
