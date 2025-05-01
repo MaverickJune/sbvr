@@ -503,9 +503,6 @@ class sbvr(torch.nn.Module):
     def _get_min_mse_coeff(self, data, search_matrix, enc_conf):
         candidate_matrix = search_matrix @ self._get_bin_combs().T
         
-        if enc_conf.input_coeff is not None:
-            min_mse, min_idx, coeff_comb_sel = \
-                self._input_inner_min_mse(data, candidate_matrix, enc_conf)
         if enc_conf.error_function == "data_diff_mse":
             min_mse, min_idx, coeff_comb_sel = \
                 self._data_diff_min_mse(data, candidate_matrix)
