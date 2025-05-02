@@ -26,7 +26,7 @@ def convert_name(name):
     
 def convert_compressed_sbvr_weights_to_model(compressed_weight_path:str = None,
                                              save_model_path:str = None):
-    if None in [compressed_weight_path, save_dir_path]:
+    if None in [compressed_weight_path, save_model_path]:
         raise ValueError("compressed_weight_path and save_dir_path cannot be None")
     compressed_weight_list = get_subdirectory_names(compressed_weight_path)
     print(_g_str(f"Compressed weight list: {compressed_weight_list}"))
@@ -61,6 +61,6 @@ if __name__ == "__main__":
     
     convert_compressed_sbvr_weights_to_model(
         compressed_weight_path=args.compressed_weight_path,
-        save_dir_path=args.save_dir_path 
+        save_model_path=args.save_dir_path 
     )
         
