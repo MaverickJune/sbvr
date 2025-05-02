@@ -45,9 +45,10 @@ class sbvr_encoder():
         return conf_str
             
     def _get_result_str(self):
-        avg_mse = self.mse_history.mean()
-        result_str = g_str("\n\tAverage MSE: ") + str(avg_mse) + \
-            y_str("\tCache hits: ") + str(self.cache_hits) + \
+        avg_mse = sum(self.mse_history) / len(self.mse_history) * 0.99 \
+            if self.mse_history else 0
+        result_str = y_str("\tAverage MSE: ") + str(avg_mse) + \
+            y_str("\n\tCache hits: ") + str(self.cache_hits) + \
             y_str("\n\tNum coeff cache lines: ") + \
                 str(self.num_coeff_cache_lines)
         return result_str

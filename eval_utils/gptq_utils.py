@@ -256,93 +256,95 @@ def gptq_fwrd(model, dataloader, dev, args):
     ]
     
     local_rank = utils.get_local_rank()
-    for i in range(local_rank, len(layers), utils.get_world_size()):
+    for i in range(len(layers)):
         layer = layers[i].to(dev)
-        full = quant_utils.find_qlayers(layer, layers=[torch.nn.Linear])
-        for names in sequential:
-            subset = {n: full[n] for n in names}
+        if (i % utils.get_world_size() == local_rank):
+            full = quant_utils.find_qlayers(layer, layers=[torch.nn.Linear])
+            for names in sequential:
+                subset = {n: full[n] for n in names}
 
-            gptq = {}
-            for name in subset:
-                print(utils.y_str(f"Rank {local_rank}: ") + 
-                                    f"L{i} {name}", end="  ", flush=True)
-                layer_weight_bits = args.w_bits
-                layer_weight_sym = not (args.w_asym)
-                if "lm_head" in name:
-                    layer_weight_bits = 16
-                    continue
-                if args.int8_down_proj and "down_proj" in name:
-                    layer_weight_bits = 8
-                gptq[name] = GPTQ(subset[name])
-                if args.w_sbvr:
-                    gptq[name].quantizer = sbvr_wrapper(encoder_config={
-                        "num_sums": layer_weight_bits,
-                        "bvr_len": 128,
-                    }, verbose=1)
-                else:
-                    gptq[name].quantizer = quant_utils.WeightQuantizer()
-                    gptq[name].quantizer.configure(
-                        layer_weight_bits,
-                        perchannel=True,
-                        sym=layer_weight_sym,
-                        mse=args.w_clip,
-                    )
-
-            def add_batch(name):
-                def tmp(_, inp, out):
-                    gptq[name].add_batch(inp[0].data, out.data)  # noqa: F821
-
-                return tmp
-
-            handles = []
-            for name in subset:
-                handles.append(subset[name].register_forward_hook(add_batch(name)))
-            for j in range(args.nsamples):
-                outs[j] = layer(
-                    inps[j].unsqueeze(0),
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                )[0]
-            for h in handles:
-                h.remove()
-
-            for name in subset:
-                tick = time.time()
-                layer_w_groupsize = args.w_groupsize
-                if args.w_sbvr:
-                    path = args.save_qmodel_path + f"/sbvr_layer_{i}_{name}.pt"
-                    if os.path.exists(path):
-                        gptq[name].quantizer = sbvr.load(path, device=dev)
-                        q = gptq[name].quantizer.decode().T
-                        gptq[name].layer.weight.data = \
-                                    q.to(gptq[name].layer.weight.data.dtype)
-                        gptq[name].quantizer = None
+                gptq = {}
+                for name in subset:
+                    print(utils.y_str(f"Rank {local_rank}: ") + 
+                                        f"L{i} {name}", end="  ", flush=True)
+                    layer_weight_bits = args.w_bits
+                    layer_weight_sym = not (args.w_asym)
+                    if "lm_head" in name:
+                        layer_weight_bits = 16
+                        continue
+                    if args.int8_down_proj and "down_proj" in name:
+                        layer_weight_bits = 8
+                    gptq[name] = GPTQ(subset[name])
+                    if args.w_sbvr:
+                        gptq[name].quantizer = sbvr_wrapper(encoder_config={
+                            "num_sums": layer_weight_bits,
+                            "bvr_len": 128,
+                        }, verbose=1)
                     else:
-                        gptq[name].fasterquant(
+                        gptq[name].quantizer = quant_utils.WeightQuantizer()
+                        gptq[name].quantizer.configure(
+                            layer_weight_bits,
+                            perchannel=True,
+                            sym=layer_weight_sym,
+                            mse=args.w_clip,
+                        )
+
+                def add_batch(name):
+                    def tmp(_, inp, out):
+                        gptq[name].add_batch(inp[0].data, out.data)  # noqa: F821
+
+                    return tmp
+
+                handles = []
+                for name in subset:
+                    handles.append(subset[name].register_forward_hook(add_batch(name)))
+                for j in range(args.nsamples):
+                    outs[j] = layer(
+                        inps[j].unsqueeze(0),
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                    )[0]
+                for h in handles:
+                    h.remove()
+
+                for name in subset:
+                    tick = time.time()
+                    layer_w_groupsize = args.w_groupsize
+                    if args.w_sbvr:
+                        path = args.save_qmodel_path + f"/sbvr_layer_{i}_{name}.pt"
+                        if os.path.exists(path):
+                            gptq[name].quantizer = sbvr.load(path, device=dev)
+                            q = gptq[name].quantizer.decode().T
+                            gptq[name].layer.weight.data = \
+                                        q.to(gptq[name].layer.weight.data.dtype)
+                            gptq[name].quantizer = None
+                        else:
+                            gptq[name].fasterquant(
+                                percdamp=args.percdamp,
+                                groupsize=layer_w_groupsize,
+                                actorder=args.act_order,
+                                static_groups=False,
+                                export_to_et=args.export_to_et,
+                            )
+                            print(utils.y_str(f"Rank {local_rank}: ") +
+                                f"Processed {gptq[name].quantizer.bvr_idx} BVRs in "
+                                f"{time.time() - tick:.2f}s")
+                            gptq[name].quantizer.finalize_encoding()
+                            gptq[name].quantizer.save(args.save_qmodel_path + 
+                                                    f"/sbvr_layer_{i}_{name}.pt")
+                            gptq[name].quantizer = None
+                    else:
+                            gptq[name].fasterquant(
                             percdamp=args.percdamp,
                             groupsize=layer_w_groupsize,
                             actorder=args.act_order,
                             static_groups=False,
                             export_to_et=args.export_to_et,
                         )
-                        print(utils.y_str(f"Rank {local_rank}: ") +
-                            f"Processed {gptq[name].quantizer.bvr_idx} BVRs in "
-                            f"{time.time() - tick:.2f}s")
-                        gptq[name].quantizer.finalize_encoding()
-                        gptq[name].quantizer.save(args.save_qmodel_path + 
-                                                f"/sbvr_layer_{i}_{name}.pt")
-                        gptq[name].quantizer = None
-                else:
-                        gptq[name].fasterquant(
-                        percdamp=args.percdamp,
-                        groupsize=layer_w_groupsize,
-                        actorder=args.act_order,
-                        static_groups=False,
-                        export_to_et=args.export_to_et,
-                    )
-                weights[f"layer_{i}_{name}"] = gptq[name].layer.weight.data.clone()
-                quantizers["model.layers.%d.%s" % (i, name)] = gptq[name].quantizer
-                gptq[name].free()
+                    weights[f"layer_{i}_{name}"] = gptq[name].layer.weight.data.clone()
+                    quantizers["model.layers.%d.%s" % (i, name)] = gptq[name].quantizer
+                    gptq[name].free()
+                del gptq
 
         for j in range(args.nsamples):
             outs[j] = layer(
@@ -353,7 +355,6 @@ def gptq_fwrd(model, dataloader, dev, args):
 
         layers[i] = layer.cpu()
         del layer
-        del gptq
         torch.cuda.empty_cache()
 
         inps, outs = outs, inps
