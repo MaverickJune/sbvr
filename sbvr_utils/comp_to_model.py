@@ -25,7 +25,7 @@ def convert_name(name):
     return parts[0] + '/' + parts[1].split('_num_sum_')[0]
     
 def convert_compressed_sbvr_weights_to_model(compressed_weight_path:str = None,
-                                             save_dir_path:str = None):
+                                             save_model_path:str = None):
     if None in [compressed_weight_path, save_dir_path]:
         raise ValueError("compressed_weight_path and save_dir_path cannot be None")
     compressed_weight_list = get_subdirectory_names(compressed_weight_path)
@@ -35,7 +35,7 @@ def convert_compressed_sbvr_weights_to_model(compressed_weight_path:str = None,
         print(_b_str(f"Processing {name}..."))
         model, _ = get_llama(model_path=convert_name(name), device_map="cuda:0")
         weight_dir_path = os.path.join(compressed_weight_path, name)
-        save_dir_path = os.path.join(save_dir_path, name)
+        save_dir_path = os.path.join(save_model_path, name)
         print(_y_str(f"Weight dir path: {weight_dir_path}"))
         print(_y_str(f"Save dir path: {save_dir_path}"))
         sbvr_decompress_on_llama(model=model,
@@ -48,8 +48,8 @@ def convert_compressed_sbvr_weights_to_model(compressed_weight_path:str = None,
         gc.collect()
         print(_g_str(f"Decompressed model saved to {save_dir_path}"))
         
-        weight_dir_path = None
-        save_dir_path = None
+        weight_dir_path = compressed_weight_path
+        save_dir_path = save_model_path
         
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
