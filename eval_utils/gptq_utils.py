@@ -364,14 +364,14 @@ def gptq_fwrd(model, dataloader, dev, args):
     torch.distributed.barrier()
     
     # Gather quantizers from all ranks
-    if utils.get_world_size():
+    if utils.get_world_size() > 1:
         quantizers_list = utils.all_gather_dict(quantizers)
         weights_list = utils.all_gather_dict(weights)
         for q in quantizers_list:
             quantizers.update(q)
         for w in weights_list:
             weights.update(w)
-    if local_rank == 0 and utils.get_world_size():
+    if local_rank == 0 and utils.get_world_size() > 1:
         print (utils.y_str("Gathered weights from all ranks: ") + str(weights.keys()))
         for i in range(len(layers)):
             layer = layers[i].to(dev)
