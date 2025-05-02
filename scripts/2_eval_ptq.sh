@@ -7,6 +7,12 @@
 
 # nnodes determines the number of GPU nodes to utilize (usually 1 for an 8 GPU node)
 # nproc_per_node indicates the number of GPUs per node to employ.
+
+# meta-llama/Llama-3.2-1B
+# meta-llama/Llama-3.2-3B
+# meta-llama/Meta-Llama-3-8B
+# meta-llama/Meta-Llama-3-70B
+
 name=$(echo $1 | sed 's|/|_|g')
 path="quantized_model/${name}_$2_$3_$4"
 mkdir -p $path
@@ -33,5 +39,5 @@ torchrun --nnodes=1 --nproc_per_node=$5 ptq.py \
 --rotate \
 --rotate_mode "hadamard" \
 --save_qmodel_path "$path" \
-# --optimized_rotation_path "your_path/R.bin" \
+# --optimized_rotation_path "1B_R.bin" \
 
