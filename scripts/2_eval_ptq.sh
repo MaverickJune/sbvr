@@ -7,8 +7,9 @@
 
 # nnodes determines the number of GPU nodes to utilize (usually 1 for an 8 GPU node)
 # nproc_per_node indicates the number of GPUs per node to employ.
-mkdir -p quantized_model
 name=$(echo $1 | sed 's|/|_|g')
+path="quantized_model/${name}_$2_$3_$4"
+mkdir -p $path
 torchrun --nnodes=1 --nproc_per_node=$5 ptq.py \
 --input_model $1 \
 --do_train False \
@@ -31,6 +32,6 @@ torchrun --nnodes=1 --nproc_per_node=$5 ptq.py \
 --w_sbvr \
 --rotate \
 --rotate_mode "hadamard" \
---save_qmodel_path "quantized_model/$name_$2_$3_$4.pt" \
+--save_qmodel_path "$path" \
 # --optimized_rotation_path "your_path/R.bin" \
 

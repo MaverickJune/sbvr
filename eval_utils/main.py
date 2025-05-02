@@ -87,7 +87,7 @@ def ptq_model(args, model, model_args=None):
                 save_dict = sanitize_checkpoint_from_spinquant(
                     save_dict, group_size=args.w_groupsize
                 )
-            torch.save(save_dict, args.save_qmodel_path)
+            torch.save(save_dict, args.save_qmodel_path + "/quantized_model.pt")
 
     # Add Input Quantization
     if args.a_bits < 16 or args.v_bits < 16:

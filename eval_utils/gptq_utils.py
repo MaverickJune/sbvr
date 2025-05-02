@@ -13,15 +13,16 @@ import logging
 import math
 import pprint
 import time
+import os
 
 import torch
 import torch.nn as nn
 import tqdm
 
-from sbvr import sbvr
+import sbvr
 from utils import quant_utils, utils
 
-class sbvr_wrapper(sbvr):
+class sbvr_wrapper(sbvr.sbvr):
     def __init__(self,
                  encoder_config,
                  verbose):
@@ -87,12 +88,10 @@ class GPTQ:
         export_to_et=False,
     ):
         W = self.layer.weight.data.clone()
-        W = W.float()
-
-        tick = time.time()
-
+        
         if not self.quantizer.ready():
             self.quantizer.find_params(W)
+        W = W.float()
 
         H = self.H
         del self.H
@@ -100,7 +99,7 @@ class GPTQ:
         H[dead, dead] = 1
         W[:, dead] = 0
         
-        if isinstance(self.quantizer, sbvr):
+        if isinstance(self.quantizer, sbvr.sbvr):
             use_sbvr = True
         else:
             use_sbvr = False
@@ -244,6 +243,7 @@ def gptq_fwrd(model, dataloader, dev, args):
     position_ids = cache["position_ids"]
 
     quantizers = {}
+    weights = {}
     sequential = [
         [
             "self_attn.k_proj.module",
@@ -307,16 +307,40 @@ def gptq_fwrd(model, dataloader, dev, args):
                 h.remove()
 
             for name in subset:
+                tick = time.time()
                 layer_w_groupsize = args.w_groupsize
-                gptq[name].fasterquant(
-                    percdamp=args.percdamp,
-                    groupsize=layer_w_groupsize,
-                    actorder=args.act_order,
-                    static_groups=False,
-                    export_to_et=args.export_to_et,
-                )
                 if args.w_sbvr:
-                    gptq[name].quantizer.finalize_encoding()
+                    path = args.save_qmodel_path + f"/sbvr_layer_{i}_{name}.pt"
+                    if os.path.exists(path):
+                        gptq[name].quantizer = sbvr.load(path, device=dev)
+                        q = gptq[name].quantizer.decode().T
+                        gptq[name].layer.weight.data = \
+                                    q.to(gptq[name].layer.weight.data.dtype)
+                        gptq[name].quantizer = None
+                    else:
+                        gptq[name].fasterquant(
+                            percdamp=args.percdamp,
+                            groupsize=layer_w_groupsize,
+                            actorder=args.act_order,
+                            static_groups=False,
+                            export_to_et=args.export_to_et,
+                        )
+                        print(utils.y_str(f"Rank {local_rank}: ") +
+                            f"Processed {gptq[name].quantizer.bvr_idx} BVRs in "
+                            f"{time.time() - tick:.2f}s")
+                        gptq[name].quantizer.finalize_encoding()
+                        gptq[name].quantizer.save(args.save_qmodel_path + 
+                                                f"/sbvr_layer_{i}_{name}.pt")
+                        gptq[name].quantizer = None
+                else:
+                        gptq[name].fasterquant(
+                        percdamp=args.percdamp,
+                        groupsize=layer_w_groupsize,
+                        actorder=args.act_order,
+                        static_groups=False,
+                        export_to_et=args.export_to_et,
+                    )
+                weights[f"layer_{i}_{name}"] = gptq[name].layer.weight.data.clone()
                 quantizers["model.layers.%d.%s" % (i, name)] = gptq[name].quantizer
                 gptq[name].free()
 
@@ -336,12 +360,27 @@ def gptq_fwrd(model, dataloader, dev, args):
 
     model.config.use_cache = use_cache
     utils.cleanup_memory(verbose=True)
+    torch.distributed.barrier()
+    
     # Gather quantizers from all ranks
     if utils.get_world_size():
         quantizers_list = utils.all_gather_dict(quantizers)
+        weights_list = utils.all_gather_dict(weights)
         for q in quantizers_list:
             quantizers.update(q)
+        for w in weights_list:
+            weights.update(w)
+    if local_rank == 0 and utils.get_world_size():
+        print (utils.y_str("Gathered weights from all ranks: ") + str(weights.keys()))
+        for i in range(len(layers)):
+            layer = layers[i].to(dev)
+            full = quant_utils.find_qlayers(layer, layers=[torch.nn.Linear])
+            for names in sequential:
+                subset = {n: full[n] for n in names}
+                for name in subset:
+                    subset[name].weight.data = weights[f"layer_{i}_{name}"] 
     
+    torch.distributed.barrier()
     logging.info("-----GPTQ Quantization Done-----\n")
     print(utils.g_str("GPTQ Quantization Done!"))
     return quantizers
