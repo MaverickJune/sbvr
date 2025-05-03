@@ -4,3 +4,4 @@ datasets==3.4.1
 accelerate==1.6.0
 bitsandbytes==0.45.5
 colorlog==6.9.0
+lm_eval==0.3.0
