@@ -9,3 +9,9 @@ build/
 *.pyc
 *.egg
 *.egg-info
+
+compressed_weights/
+eval/
+sbvr_models/
+sbvr_utils/
+cutlass/

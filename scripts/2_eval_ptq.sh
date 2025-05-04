@@ -39,5 +39,5 @@ torchrun --nnodes=1 --nproc_per_node=$5 ptq.py \
 --rotate \
 --rotate_mode "hadamard" \
 --save_qmodel_path "$path" \
---optimized_rotation_path "3B_R.bin" \
+# --optimized_rotation_path "3B_R.bin" \
 
