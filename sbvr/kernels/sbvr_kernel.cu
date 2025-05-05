@@ -123,12 +123,12 @@ __global__ void cuda_row_deq_mm_T(
     r_bvr is grouped in row-direction: (N/32(num_bits in bvr dtype, uint32), K, num_sums)
     r_coeff_idx: (N/group_size, K)
     */
-
+   
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     const int lane = threadIdx.x & 31;
     const int warp_id = tid >> 5;
     const int N_EFF = N / 32; 
-    const int totalWarps = M * N_EFF; 
+    const int totalWarps = M * N_EFF;
 
     for (int wid = warp_id; wid < totalWarps; wid += (blockDim.x * gridDim.x)>>5)
     {
@@ -137,21 +137,21 @@ __global__ void cuda_row_deq_mm_T(
 
         float sum = (bias != nullptr) ? __half2float(bias[n * 32 + lane]) : 0.0f;
 
+        __half l_val;
+        uint32_t bv[RNumSums];
+        uint32_t curr_r_coeff_idx;
+
         #pragma unroll
         for (int k = 0; k < K; k++)
         {
-            __half l_val;
-            uint32_t bv[RNumSums];
-            uint32_t r_idx_board[RNumSums];
+            
             if (lane == 0)
             {
                 l_val = l_w[m * K + k];
                 #pragma unroll
                 for (int s = 0; s < RNumSums; s++)
                     bv[s] = r_bvr[(n * K + k) * RNumSums + s];
-                #pragma unroll
-                for (int s = 0; s < RNumSums; s++)
-                    r_idx_board[s] = r_coeff_idx[(n / N_PER_BVR) * K + k];
+                curr_r_coeff_idx = r_coeff_idx[(n / N_PER_BVR) * K + k];
             }
 
             float c_board[RNumSums];
@@ -159,9 +159,7 @@ __global__ void cuda_row_deq_mm_T(
 
             constexpr unsigned FULL = 0xFFFFFFFFu;
             l_val = __shfl_sync(FULL, l_val, 0);
-            #pragma unroll
-            for (int s = 0; s < RNumSums; ++s)
-                r_idx_board[s] = __shfl_sync(FULL, r_idx_board[s], 0);
+            curr_r_coeff_idx = __shfl_sync(FULL, curr_r_coeff_idx, 0);
 
             #pragma unroll
             for (int s = 0; s < RNumSums; s++)
@@ -171,9 +169,7 @@ __global__ void cuda_row_deq_mm_T(
             #pragma unroll
             for(int s = 0; s < RNumSums; s++)
             {
-                c_board[s] = __half2float(
-                    __shfl_sync(FULL, r_coeff_cache[r_idx_board[s] * RNumSums])
-                );
+                c_board[s] = __half2float(r_coeff_cache[curr_r_coeff_idx * RNumSums + s]);
                 b_board[s] = (bv[s] >> lane) & 1;
             }
 
