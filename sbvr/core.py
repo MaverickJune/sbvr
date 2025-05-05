@@ -207,7 +207,8 @@ class sbvr(torch.nn.Module):
                  encoder_config: dict = None,
                  device: torch.device = None,
                  sbvr_serialized: _sbvr_serialized = None,
-                 verbose_level: int = 1):
+                 verbose_level: int = 1,
+                 trans: bool = False):
         super(sbvr, self).__init__()
         _device = device if device is not None else \
             torch.device("cuda") if torch.cuda.is_available() \
@@ -226,6 +227,8 @@ class sbvr(torch.nn.Module):
                 _r_str("Must provide either data or serialized SBVR"))
         
         if data is not None:
+            if trans:
+                data = data.transpose(0, 1).contiguous()
             if not isinstance(data, torch.Tensor):
                 raise ValueError(
                     _r_str("Data must be a torch tensor"))
