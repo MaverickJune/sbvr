@@ -115,12 +115,13 @@ template <typename RIndexT, typename RNumSums>
 __global__ void cuda_row_deq_mm_T(
     __half* __restrict__ l_w,
     uint32_t* r_bvr, RIndexT* r_coeff_idx, __half* __restrict__ r_coeff_cache,
-    __half* bias, __half* out,
+    __half* __restrict__ bias, __half* __restrict__ out,
     int M, int N, int K)
 {
     /*
     C = A @ B^T
-    r_bvr is grouped in row-direction, (N/32(num_bits in bvr dtype, uint32), K, num_sums)
+    r_bvr is grouped in row-direction: (N/32(num_bits in bvr dtype, uint32), K, num_sums)
+    r_coeff_idx: (N/group_size, K)
     */
 
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -158,7 +159,10 @@ __global__ void cuda_row_deq_mm_T(
 
             constexpr unsigned FULL = 0xFFFFFFFFu;
             l_val = __shfl_sync(FULL, l_val, 0);
-            _r_coeff_idx_4 = __shfl_sync(FULL, _r_coeff_idx_4, 0);
+            #pragma unroll
+            for (int s = 0; s < RNumSums; ++s)
+                r_idx_board[s] = __shfl_sync(FULL, r_idx_board[s], 0);
+
             #pragma unroll
             for (int s = 0; s < RNumSums; s++)
                 bv[s] = __shfl_sync(FULL, bv[s], 0);
@@ -168,8 +172,8 @@ __global__ void cuda_row_deq_mm_T(
             for(int s = 0; s < RNumSums; s++)
             {
                 c_board[s] = __half2float(
-                    __shfl_sync(FULL, r_coeff_cache[r_idx_board[s] * RNumSums]);
-                )
+                    __shfl_sync(FULL, r_coeff_cache[r_idx_board[s] * RNumSums])
+                );
                 b_board[s] = (bv[s] >> lane) & 1;
             }
 
@@ -233,7 +237,6 @@ __global__ void cuda_naive_sbvr_mm_T(
         }
         out[i] = __float2half(sum);
     }
-    
 }
 
 template <typename LIndexT, typename RIndexT, int LNumSums, int RNumSums,
