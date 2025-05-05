@@ -175,9 +175,10 @@ __global__ void cuda_row_deq_mm_T(
 
             float dot = 0.0f;
             #pragma unroll
-            for(int s = 0; s < RNumSums; s++)
-                dot += c_board[s] * (float)b_board[s];
-            sum += l_val_f * dot;
+            for (int s = 0; s < RNumSums; s++) {
+                dot = __fmaf_rn(c_board[s], (float)b_board[s], dot);
+            }
+            sum = __fmaf_rn(l_val_f, dot, sum);
         }
         out[m * N + (n * 32 + lane)] = __float2half(sum);
     }
@@ -237,9 +238,10 @@ __global__ void cuda_row_deq_wo_shfl_mm_T(
 
             float dot = 0.0f;
             #pragma unroll
-            for(int s = 0; s < RNumSums; s++)
-                dot += c_board[s] * (float)b_board[s];
-            sum += l_val_f * dot;
+            for (int s = 0; s < RNumSums; s++) {
+                dot = __fmaf_rn(c_board[s], (float)b_board[s], dot);
+            }
+            sum = __fmaf_rn(l_val_f, dot, sum);
         }
         out[m * N + (n * 32 + lane)] = __float2half(sum);
     }

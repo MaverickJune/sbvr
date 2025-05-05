@@ -395,6 +395,54 @@ def sbvr_matmul_time_test(mat_len=512, sbvr_max_sums=6,
               + y_str(" vs ") + f"{f16_time*10e6:.4f} usecs")
         print(y_str("\tSpeedup: ") + f"{f16_time/sbvr_time[key]:.4f}x")
         
+def sbvr_rd_matmul_time_test(mat_len=512, sbvr_max_sums=6,
+                             device=torch.device("cpu"), num_runs=10000):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    mat_a_size = (1, mat_len)
+    mat_b_size = (mat_len, mat_len)
+    mat_a = load_or_create_tensor("matrix_a", mat_a_size, device)
+    mat_b = load_or_create_tensor("matrix_b", mat_b_size, device)
+    bias = torch.randn((mat_b.size(0),), dtype=torch.float16, device=device)*0.3
+    
+    for i in range(10):
+        f16_matmul = mat_a @ mat_b.T + bias
+    torch.cuda.synchronize()
+    time_start = time.perf_counter()
+    for i in range(num_runs):
+        f16_matmul = mat_a @ mat_b.T + bias
+    torch.cuda.synchronize()
+    f16_time = (time.perf_counter() - time_start) / num_runs
+
+    sbvr_time = {}
+    sbvr_dict = {}
+    for i in range (sbvr_max_sums, 1, -2):
+        mat_a_sbvr = load_or_create_sbvr("matrix_a", mat_a.shape, device, i,
+                                        verbose_level=1)
+        mat_b_sbvr = load_or_create_sbvr("matrix_b", mat_b.shape, device, i,
+                                        verbose_level=1)
+        lhs_bvr = mat_a_sbvr.bvr
+        lhs_coeff_idx = mat_a_sbvr.coeff_idx
+        lhs_coeff_cache = mat_a_sbvr.coeff_cache
+        rhs_bvr = mat_b_sbvr.bvr
+        rhs_coeff_idx = mat_b_sbvr.coeff_idx
+        rhs_coeff_cache = mat_b_sbvr.coeff_cache
+        
+        for _ in range(10):
+            sbvr_matmul = sbvr._sbvr_mm_T(
+                                    lhs_bvr, lhs_coeff_idx, lhs_coeff_cache,
+                                    rhs_bvr, rhs_coeff_idx, rhs_coeff_cache,
+                                    bias)
+        torch.cuda.synchronize()
+        time_start = time.perf_counter()
+        for _ in range(num_runs):
+            sbvr_matmul = sbvr._sbvr_mm_T(
+                                    lhs_bvr, lhs_coeff_idx, lhs_coeff_cache,
+                                    rhs_bvr, rhs_coeff_idx, rhs_coeff_cache,
+                                    bias)
+        torch.cuda.synchronize()
+        sbvr_time[i] = (time.perf_counter() - time_start) / num_runs
+        sbvr_dict[i] = sbvr_matmul
+        
 def sbvr_online_test(mat_len=512, sbvr_max_sums=6, device=torch.device("cpu")):
     mat_size = (mat_len, mat_len)
 
