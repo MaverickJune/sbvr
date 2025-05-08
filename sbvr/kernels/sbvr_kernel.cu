@@ -10,8 +10,14 @@
 #define WARP_PER_BLOCK 4
 #define BLOCK_TILE_SIZE 32
 
-// For row_deq_mm_T
+// for rd_mm_T series
+// there are some similar names, just ignore them for original sbvr kernels
 #define N_PER_BVR 8
+#define NUM_ELEM_PER_BVR 32
+
+__device__ __forceinline__ uint32_t div_ceil(int a, int b) {
+    return (a % b != 0) ? (a / b + 1) : (a / b);
+}
 
 template <int NUM_SUMS>
 struct bvrs;
@@ -244,6 +250,180 @@ __global__ void cuda_row_deq_wo_shfl_mm_T(
             sum = __fmaf_rn(l_val_f, dot, sum);
         }
         out[m * N + (n * 32 + lane)] = __float2half(sum);
+    }
+}
+
+// template <typename RIndexT, const int RNumSums, const int BK, const int BN>
+// __global__ void cuda_1xtN_rd_mm_T(
+//     __half* __restrict__ l_w,
+//     uint32_t* r_bvr, RIndexT* r_coeff_idx, __half* __restrict__ r_coeff_cache,
+//     __half* __restrict__ bias, __half* __restrict__ out,
+//     int M, int N, int K)
+// {
+//     /*
+//     In this kernel, we assume the changed memeory layout of r_bvr
+//     r_bvr: (N/32, num_sums, K)
+//     r_coeff_idx: (N/group_size, K)
+//     r_coeff_cache: (cache_size, num_sums)
+
+//     When a element of r_bvr is loaded, 32x1(N, K) patch can be decoded
+//     One warp fetch 32 patches and perform (1 x 32) @ (32, 32) GEVM iteratively
+//     along with the K dimension
+
+//     Shared memory size will be BK * (sBN * 32)
+//     Grid should be organized as (1*N / 1*BN)
+//     */
+
+//     const uint cCol = blockIdx.x;
+//     const uint per_thread_N = BN / 32;
+//     const uint max_bvr_idx = N / 32 * RNumSums * K;
+//     const uint max_coeff_idx = N / N_PER_BVR / 32 * K;
+
+//     __shared__ float Bs [BK * BN];
+//     float x[BK] = {0.0f};
+//     float w_res_temp[BN] = {0.0f};
+//     float threadResults[per_thread_N] = {0.0f};
+
+//     out += cCol * BN;
+
+//     for (uint bkIdx = 0; bkIdx < K; bkIdx += BK)
+//     {
+//         // load loop
+//         for (uint ik = 0; ik < BK; ik++)
+//             x[ik] = l_w[bkIdx * BK + ik];
+//         for (uint r_s = 0; r_s < RNumSums; r_s++)
+//         {
+//             for (uint n_off = 0; n_off < per_thread_N; n_off++)
+//             {
+//                 uint target_bvr_idx = (cCol * per_thread_N + n_off) * RNumSums * K + r_s * K + bkIdx * BK + threadIdx.x;
+//                 uint target_coeff_idx = (cCol * per_thread_N + n_off) / N_PER_BVR * K + bkIdx * BK + threadIdx.x;
+
+//                 if (target_bvr_idx >= max_bvr_idx || target_coeff_idx >= max_coeff_idx)
+//                     continue;
+
+//                 uint32_t bitvec = r_bvr[target_bvr_idx];
+//                 float coeff = __half2float(r_coeaff_cache[r_coeff_idx[target_coeff_idx] * RNumSums + r_s]);
+
+//                 uint32_t coeffi = __float_as_uint(coeff);
+//                 for(uint inner_n; inner_n < 32; inner_n++)
+//                 {
+//                     uint32_t mask = -((bitvec >> inner_n) & 1u);
+//                     w_res_temp[n_off * 32 + inner_n] += __uint_as_float(coeffi & mask);
+//                 }
+//             }
+//         }
+//         for (uint sn = 0; sn < BN; sn++)
+//             Bs[threadIdx.x * BN + sn] = w_res_temp[sn];
+//         __syncthreads();
+
+//         // compute loop
+//         // TODO: Implement the compute loop here
+
+//         __syncthreads();
+//     }
+
+//     // write back
+
+// }
+
+__device__ __forceinline__
+void warp_group_all_to_all_G4_f(
+    float val,
+    float * __restrict__ out
+)
+{
+    constexpr unsigned FULL = 0xFFFFFFFFu;
+    constexpr int GROUP = 4;
+
+    #pragma unroll
+    for (int i = 0; i < GROUP; i++)
+        out[i] = __shfl_sync(FULL, val, i, GROUP);
+}
+
+__device__ __forceinline__
+void warp_group_all_to_all_G4_u(
+    uint32_t val,
+    uint32_t * __restrict__ out
+)
+{
+    constexpr unsigned FULL = 0xFFFFFFFFu;
+    constexpr int GROUP = 4;
+
+    #pragma unroll
+    for (int i = 0; i < GROUP; i++)
+        out[i] = __shfl_sync(FULL, val, i, GROUP);
+}
+
+template <typename RIndexT>
+__global__ void cuda_1xtN_rd_WP8_TBW4_NS4(
+    __half* __restrict__ l_w,
+    uint32_t* r_bvr, RIndexT* r_coeff_idx, __half* __restrict__ r_coeff_cache,
+    __half* __restrict__ bias, __half* __restrict__ out,
+    int M, int N, int K)
+{
+    /*
+    r_bvr: (N/32, K, num_sums)
+    r_coeff_idx: (N/group_size, K)
+    r_coeff_cache: (cache_size, num_sums)
+
+    TODO 1. replace all the / and % into bitwise ops
+    */
+    constexpr uint32_t RNumSums = 4;
+    constexpr uint32_t WARP_SIZE = 32;
+    constexpr uint32_t WARPS_PER_BLOCK = 4;
+    constexpr uint32_t THREADS_PER_BLOCK = 128; // WARP_SIZE * WARPS_PER_BLOCK
+    constexpr uint32_t COLS_PER_WARP = 8;
+    constexpr uint32_t COLS_PER_BLOCK = 32; // COLS_PER_WARP * WARPS_PER_BLOCK
+    constexpr uint32_t THREADS_PER_GROUP = 4; // WARP_SIZE / COLS_PER_WARP
+
+    const uint32_t group_id = threadIdx.x / THREADS_PER_GROUP;
+    const uint32_t group_col = blockIdx.x * COLS_PER_BLOCK + group_id;
+    if (group_col >= N) {
+        return;
+    }
+    const uint32_t K_iters = div_ceil(K, THREADS_PER_GROUP);
+    const uint32_t group_lane_id = threadIdx.x % THREADS_PER_GROUP;
+    __shared__ float bvr_cache[THREADS_PER_GROUP * 256 + 32]; // 32 * 33, to avoid bank conflict on write
+
+    float tmp = 0.0f; 
+
+    for (uint32_t i = 0; i < K_iters; i++)
+    {
+        // load data into shared mem
+        if (i % 8 == 0)
+        {
+            const int r_bvr_t = r_bvr[(group_col / 32) * K * RNumSums + RNumSums * THREADS_PER_GROUP * i + theadIdx.x];
+            const int r_coeff_idx_t = r_coeff_idx[(group_col / (32 * N_PER_BVR)) * K + THREADS_PER_GROUP * i + thread_Idx.x / 4];
+            const float r_coeff_t = r_coeff_cache[r_coeff_idx_t * RNumSums + theadIdx.x % 4];
+
+            uint32_t bvr_4[4] = {0};
+            float coeff_4[4] = {0.0f};
+
+            warp_group_all_to_all_G4_u(r_bvr_t, bvr_4);
+            warp_group_all_to_all_G4_f(r_coeff_t, coeff_4);
+
+            #pragma unroll
+            for (uint32_t wu = 0; wu < 8; wu++)
+            {
+                float dequant_temp = 0.0f;
+                for (uint32_t s = 0; s < 4; s++)
+                    dequant_temp = __fmaf_rn(coeff_4[s], (float)(bvr_4[s] >> (8 * group_lane_id + wu) & 1u), dequant_temp);
+                bvr_cache[(8 * group_lane_id + wu) * 33 + group_id] = dequant_temp;
+            }
+        }
+        uint32_t l_w_idx = i * THREADS_PER_GROUP + group_lane_id;
+        uint32_t r_w_sh_idx = (i % 8) * THREADS_PER_GROUP + group_lane_id + group_id * 33;
+        tmp += __half2float(l_w[l_w_idx]) * __half2float(bvr_cache[r_w_sh_idx]);
+    }
+
+    constexpr unsigned int mask = 0xffffffff;
+    #pragma unroll
+    for (size_t i = THREADS_PER_GROUP / 2; i >= 1; i /= 2) {
+        tmp += __shfl_xor_sync(mask, tmp, i);
+    }
+
+    if (group_lane_id == 0) {
+        out[group_col] = __float2half(tmp);
     }
 }
 

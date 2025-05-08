@@ -5,6 +5,8 @@ import sbvr
 import copy
 import os
 
+import sbvr.sbvr_cuda
+
 out_dir = "data"
 os.makedirs(out_dir, exist_ok=True)
 
@@ -427,14 +429,16 @@ def sbvr_rd_matmul_time_test(mat_len=512, sbvr_max_sums=6,
             sbvr_matmul = sbvr.sbvr_cuda._sbvr_row_deq_mm_T(
                                     mat_a,
                                     rhs_bvr, rhs_coeff_idx, rhs_coeff_cache,
-                                    bias)
+                                    bias,
+                                    0)
         torch.cuda.synchronize()
         time_start = time.perf_counter()
         for _ in range(num_runs):
             sbvr_matmul = sbvr.sbvr_cuda._sbvr_row_deq_mm_T(
                                     mat_a,
                                     rhs_bvr, rhs_coeff_idx, rhs_coeff_cache,
-                                    bias)
+                                    bias,
+                                    0)
         torch.cuda.synchronize()
         sbvr_time[i] = (time.perf_counter() - time_start) / num_runs
         sbvr_dict[i] = sbvr_matmul
