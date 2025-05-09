@@ -15,7 +15,7 @@
 #define N_PER_BVR 8
 #define NUM_ELEM_PER_BVR 32
 
-__device__ __forceinline__ uint32_t div_ceil(int a, int b) {
+__device__ __host__ __forceinline__ uint32_t div_ceil(int a, int b) {
     return (a % b != 0) ? (a / b + 1) : (a / b);
 }
 
@@ -320,7 +320,7 @@ __global__ void cuda_1xtN_rd_WP8_TBW4_NS4(
     {
         const uint32_t r_bvr_t = r_bvr[(group_col / 32) * K * RNumSums + RNumSums * 32 * i + threadIdx.x];
         const int r_coeff_idx_t = r_coeff_idx[(group_col / (32 * N_PER_BVR)) * K + 32 * i + threadIdx.x / 4];
-        const float r_coeff_t = r_coeff_cache[r_coeff_idx_t * RNumSums + theadIdx.x % 4];
+        const float r_coeff_t = __half2float(r_coeff_cache[r_coeff_idx_t * RNumSums + threadIdx.x % 4]);
 
         uint32_t bvr_4[4] = {0};
         float coeff_4[4] = {0.0f};
@@ -341,7 +341,7 @@ __global__ void cuda_1xtN_rd_WP8_TBW4_NS4(
         {
             uint32_t l_w_idx = 32 * i + THREADS_PER_GROUP * ki + group_lane_id;
             uint32_t r_w_sh_idx = ki * THREADS_PER_GROUP + group_lane_id + group_id * 33;
-            tmp += __half2float(l_w[l_w_idx]) * __half2float(bvr_cache[r_w_sh_idx]);
+            tmp += __half2float(l_w[l_w_idx]) * bvr_cache[r_w_sh_idx];
         }
         __syncthreads();
     }
@@ -573,7 +573,7 @@ void launch_sbvr_row_deq_kernel(
         {
             blocks = div_ceil(N, 32);
             threads = 128;
-            cuda_1xtN_rd_WP8_TBW4_NS4<RIndexT><<blocks, threads>>(
+            cuda_1xtN_rd_WP8_TBW4_NS4<RIndexT><<<blocks, threads>>>(
                 l_w,
                 r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
                 bias, out,
@@ -596,7 +596,7 @@ void launch_sbvr_row_deq_kernel(
         {
             blocks = div_ceil(N, 32);
             threads = 128;
-            cuda_1xtN_rd_WP8_TBW4_NS4<RIndexT><<blocks, threads>>(
+            cuda_1xtN_rd_WP8_TBW4_NS4<RIndexT><<<blocks, threads>>>(
                 l_w,
                 r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
                 bias, out,
