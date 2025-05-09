@@ -310,17 +310,16 @@ __global__ void cuda_1xtN_rd_WP8_TBW4_NS4(
     }
 
     const uint32_t K_sh_iters = div_ceil(K, 32);
-    const uint32_t K_sh_inner_iters = 8; // 32 / THREADS_PER_GROUP
     const uint32_t group_lane_id = threadIdx.x % THREADS_PER_GROUP;
 
     __shared__ float bvr_cache[32 * 32 + 32]; // 32 * 33, to avoid bank conflict on write
     float tmp = 0.0f; 
 
-    for (uint32_t i = 0; i < K_sh_iters; i += 32)
+    for (uint32_t i = 0; i < K; i += 32)
     {
-        const uint32_t r_bvr_t = r_bvr[(group_col / 32) * K * RNumSums + RNumSums * 32 * i + threadIdx.x];
-        const int r_coeff_idx_t = r_coeff_idx[(group_col / (32 * N_PER_BVR)) * K + 32 * i + threadIdx.x / 4];
-        const float r_coeff_t = __half2float(r_coeff_cache[r_coeff_idx_t * RNumSums + threadIdx.x % 4]);
+        const uint32_t r_bvr_t = r_bvr[(group_col / 32) * K * RNumSums + RNumSums * i + threadIdx.x];
+        const int r_coeff_idx_t = r_coeff_idx[(group_col / (32 * N_PER_BVR)) * K + i + group_id];
+        const float r_coeff_t = __half2float(r_coeff_cache[r_coeff_idx_t * RNumSums + group_lane_id]);
 
         uint32_t bvr_4[4] = {0};
         float coeff_4[4] = {0.0f};
@@ -337,10 +336,10 @@ __global__ void cuda_1xtN_rd_WP8_TBW4_NS4(
         }
         __syncthreads();
 
-        for (uint32_t ki = 0; ki < K_sh_inner_iters; ki ++)
+        for (uint32_t ki = 0; ki < 32; ki += THREADS_PER_GROUP)
         {
-            uint32_t l_w_idx = 32 * i + THREADS_PER_GROUP * ki + group_lane_id;
-            uint32_t r_w_sh_idx = ki * THREADS_PER_GROUP + group_lane_id + group_id * 33;
+            uint32_t l_w_idx = i + ki + group_lane_id;
+            uint32_t r_w_sh_idx = ki + group_lane_id + group_id * 33;
             tmp += __half2float(l_w[l_w_idx]) * bvr_cache[r_w_sh_idx];
         }
         __syncthreads();
@@ -571,7 +570,7 @@ void launch_sbvr_row_deq_kernel(
     {
         if (RNumSums == 4)
         {
-            blocks = div_ceil(N, 32);
+            blocks = div_ceil(N, 128);
             threads = 128;
             cuda_1xtN_rd_WP8_TBW4_NS4<RIndexT><<<blocks, threads>>>(
                 l_w,

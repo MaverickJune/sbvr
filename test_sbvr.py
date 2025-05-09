@@ -399,7 +399,8 @@ def sbvr_matmul_time_test(mat_len=512, sbvr_max_sums=6,
         print(y_str("\tSpeedup: ") + f"{f16_time/sbvr_time[key]:.4f}x")
         
 def sbvr_rd_matmul_time_test(mat_len=512, sbvr_max_sums=6,
-                             device=torch.device("cpu"), num_runs=10000):
+                             device=torch.device("cpu"), num_runs=10000,
+                             no_numsums_iter = False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     mat_a_size = (1, mat_len)
     mat_b_size = (mat_len, mat_len)
@@ -418,6 +419,7 @@ def sbvr_rd_matmul_time_test(mat_len=512, sbvr_max_sums=6,
 
     sbvr_time = {}
     sbvr_dict = {}
+        
     for i in range (sbvr_max_sums, 1, -2):
         mat_b_sbvr_trans = load_or_create_sbvr("matrix_b", mat_b.shape, device, i,
                                         verbose_level=1, trans=True)
@@ -442,6 +444,9 @@ def sbvr_rd_matmul_time_test(mat_len=512, sbvr_max_sums=6,
         torch.cuda.synchronize()
         sbvr_time[i] = (time.perf_counter() - time_start) / num_runs
         sbvr_dict[i] = sbvr_matmul
+        
+        if no_numsums_iter:
+            break
         
     print(y_str("Matrix A Size: ") + str(mat_a_size) + ", " +
         y_str("Matrix B Size: ") + str(mat_b_size))
@@ -490,7 +495,7 @@ if __name__ == "__main__":
     
     # sbvr_randn_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_randn_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
-    sbvr_rd_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device)
+    sbvr_rd_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device, no_numsums_iter=True)
     # sbvr_store_and_load_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_mat_mat_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device)
