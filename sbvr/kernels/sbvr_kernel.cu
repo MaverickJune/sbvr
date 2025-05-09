@@ -381,39 +381,44 @@ __global__ void cuda_1xtN_rd_WP8_TBW4_NS4(
     if (group_col >= N) {
         return;
     }
-    const uint32_t K_iters = div_ceil(K, THREADS_PER_GROUP);
-    const uint32_t group_lane_id = threadIdx.x % THREADS_PER_GROUP;
-    __shared__ float bvr_cache[THREADS_PER_GROUP * 256 + 32]; // 32 * 33, to avoid bank conflict on write
 
+    const uint32_t K_sh_iters = div_ceil(K, 32);
+    const uint32_t K_sh_inner_iters = 8; // 32 / THREADS_PER_GROUP
+    const uint32_t group_lane_id = threadIdx.x % THREADS_PER_GROUP;
+
+    __shared__ float bvr_cache[32 * 32 + 32]; // 32 * 33, to avoid bank conflict on write
     float tmp = 0.0f; 
 
-    for (uint32_t i = 0; i < K_iters; i++)
+    for (uint32_t i = 0; i < K_sh_iters; i += 32)
     {
-        // load data into shared mem
-        if (i % 8 == 0)
+        const uint32_t r_bvr_t = r_bvr[(group_col / 32) * K * RNumSums + RNumSums * 32 * i + threadIdx.x];
+        const int r_coeff_idx_t = r_coeff_idx[(group_col / (32 * N_PER_BVR)) * K + 32 * i + threadIdx.x / 4];
+        const float r_coeff_t = r_coeff_cache[r_coeff_idx_t * RNumSums + theadIdx.x % 4];
+
+        uint32_t bvr_4[4] = {0};
+        float coeff_4[4] = {0.0f};
+
+        warp_group_all_to_all_G4_u(r_bvr_t, bvr_4);
+        warp_group_all_to_all_G4_f(r_coeff_t, coeff_4);
+
+        #pragma unroll
+        for (uint32_t wu = 0; wu < 8; wu++)
         {
-            const int r_bvr_t = r_bvr[(group_col / 32) * K * RNumSums + RNumSums * THREADS_PER_GROUP * i + theadIdx.x];
-            const int r_coeff_idx_t = r_coeff_idx[(group_col / (32 * N_PER_BVR)) * K + THREADS_PER_GROUP * i + thread_Idx.x / 4];
-            const float r_coeff_t = r_coeff_cache[r_coeff_idx_t * RNumSums + theadIdx.x % 4];
-
-            uint32_t bvr_4[4] = {0};
-            float coeff_4[4] = {0.0f};
-
-            warp_group_all_to_all_G4_u(r_bvr_t, bvr_4);
-            warp_group_all_to_all_G4_f(r_coeff_t, coeff_4);
-
+            float dequant_temp = 0.0f;
             #pragma unroll
-            for (uint32_t wu = 0; wu < 8; wu++)
-            {
-                float dequant_temp = 0.0f;
-                for (uint32_t s = 0; s < 4; s++)
-                    dequant_temp = __fmaf_rn(coeff_4[s], (float)(bvr_4[s] >> (8 * group_lane_id + wu) & 1u), dequant_temp);
-                bvr_cache[(8 * group_lane_id + wu) * 33 + group_id] = dequant_temp;
-            }
+            for (uint32_t s = 0; s < 4; s++)
+                dequant_temp = __fmaf_rn(coeff_4[s], (float)(bvr_4[s] >> (8 * group_lane_id + wu) & 1u), dequant_temp);
+            bvr_cache[(8 * group_lane_id + wu) * 33 + group_id] = dequant_temp;
         }
-        uint32_t l_w_idx = i * THREADS_PER_GROUP + group_lane_id;
-        uint32_t r_w_sh_idx = (i % 8) * THREADS_PER_GROUP + group_lane_id + group_id * 33;
-        tmp += __half2float(l_w[l_w_idx]) * __half2float(bvr_cache[r_w_sh_idx]);
+        __syncthreads();
+
+        for (uint32_t ki = 0; ki < K_sh_inner_iters; ki ++)
+        {
+            uint32_t l_w_idx = 32 * i + THREADS_PER_GROUP * ki + group_lane_id;
+            uint32_t r_w_sh_idx = ki * THREADS_PER_GROUP + group_lane_id + group_id * 33;
+            tmp += __half2float(l_w[l_w_idx]) * __half2float(bvr_cache[r_w_sh_idx]);
+        }
+        __syncthreads();
     }
 
     constexpr unsigned int mask = 0xffffffff;
