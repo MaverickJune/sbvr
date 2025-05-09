@@ -401,11 +401,9 @@ __global__ void cuda_1xtN_rd_WP8_TBW4_NS4(
         warp_group_all_to_all_G4_u(r_bvr_t, bvr_4);
         warp_group_all_to_all_G4_f(r_coeff_t, coeff_4);
 
-        #pragma unroll
         for (uint32_t wu = 0; wu < 8; wu++)
         {
             float dequant_temp = 0.0f;
-            #pragma unroll
             for (uint32_t s = 0; s < 4; s++)
                 dequant_temp = __fmaf_rn(coeff_4[s], (float)(bvr_4[s] >> (8 * group_lane_id + wu) & 1u), dequant_temp);
             bvr_cache[(8 * group_lane_id + wu) * 33 + group_id] = dequant_temp;
@@ -428,7 +426,9 @@ __global__ void cuda_1xtN_rd_WP8_TBW4_NS4(
     }
 
     if (group_lane_id == 0) {
-        out[group_col] = __float2half(tmp);
+        __half bias_val = (bias != nullptr) ? bias[group_col] : __float2half(0.0f);
+        bias_val = __hadd(__float2half(tmp), bias_val);
+        out[group_col] = bias_val;
     }
 }
 
@@ -644,21 +644,49 @@ void launch_sbvr_row_deq_kernel(
 
     if (use_shfl)
     {
-        cuda_row_deq_mm_T<RIndexT, RNumSums><<<blocks, threads>>>(
-            l_w,
-            r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
-            bias, out,
-            M, N, K
-        );
+        if (RNumSums == 4)
+        {
+            blocks = div_ceil(N, 32);
+            threads = 128;
+            cuda_1xtN_rd_WP8_TBW4_NS4<RIndexT><<blocks, threads>>(
+                l_w,
+                r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
+                bias, out,
+                M, N, K
+            );
+        }
+        else
+        {
+            cuda_row_deq_mm_T<RIndexT, RNumSums><<<blocks, threads>>>(
+                l_w,
+                r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
+                bias, out,
+                M, N, K
+            );
+        }
     }
     else
     {
-        cuda_row_deq_wo_shfl_mm_T<RIndexT, RNumSums><<<blocks, threads>>>(
-            l_w,
-            r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
-            bias, out,
-            M, N, K
-        );
+        if (RNumSums == 4)
+        {
+            blocks = div_ceil(N, 32);
+            threads = 128;
+            cuda_1xtN_rd_WP8_TBW4_NS4<RIndexT><<blocks, threads>>(
+                l_w,
+                r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
+                bias, out,
+                M, N, K
+            );
+        }
+        else
+        {
+            cuda_row_deq_wo_shfl_mm_T<RIndexT, RNumSums><<<blocks, threads>>>(
+                l_w,
+                r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
+                bias, out,
+                M, N, K
+            );
+        }
     }
 
     cudaError_t err = cudaGetLastError();
