@@ -34,8 +34,11 @@ class sbvr_wrapper(sbvr.sbvr):
     def configure(self):
         return
     
-    def find_params(self, x):
-        self.prepare_encoding(x.T)
+    def find_params(self, x, transpose=False):
+        if not transpose:
+            self.prepare_encoding(x.T)
+        else:
+            self.prepare_encoding(x)
         return
     
     def fake_quantize(self, x):
@@ -86,11 +89,12 @@ class GPTQ:
         actorder=False,
         static_groups=False,
         export_to_et=False,
+        blockwise_only=False
     ):
         W = self.layer.weight.data.clone()
         
         if not self.quantizer.ready():
-            self.quantizer.find_params(W)
+            self.quantizer.find_params(W, transpose=blockwise_only)
         W = W.float()
 
         H = self.H
@@ -127,48 +131,73 @@ class GPTQ:
         H = torch.cholesky_inverse(H)
         H = torch.linalg.cholesky(H, upper=True)
         Hinv = H
+        
+        if not blockwise_only:
+            for i1 in range(0, self.columns, blocksize):
+                i2 = min(i1 + blocksize, self.columns)
+                count = i2 - i1
 
-        for i1 in range(0, self.columns, blocksize):
-            i2 = min(i1 + blocksize, self.columns)
-            count = i2 - i1
+                W1 = W[:, i1:i2].clone()
+                Q1 = torch.zeros_like(W1)
+                Err1 = torch.zeros_like(W1)
+                Losses1 = torch.zeros_like(W1)
+                Hinv1 = Hinv[i1:i2, i1:i2]
 
-            W1 = W[:, i1:i2].clone()
-            Q1 = torch.zeros_like(W1)
-            Err1 = torch.zeros_like(W1)
-            Losses1 = torch.zeros_like(W1)
-            Hinv1 = Hinv[i1:i2, i1:i2]
+                for i in range(count):
+                    w = W1[:, i]
+                    d = Hinv1[i, i]
 
-            for i in range(count):
-                w = W1[:, i]
-                d = Hinv1[i, i]
+                    if groupsize != -1:
+                        if not static_groups:
+                            if (i1 + i) % groupsize == 0:
+                                self.quantizer.find_params(
+                                    W[:, (i1 + i) : (i1 + i + groupsize)]
+                                )
+                        else:
+                            idx = i1 + i
+                            if actorder:
+                                idx = perm[idx]
+                            self.quantizer = groups[idx // groupsize]
 
-                if groupsize != -1:
-                    if not static_groups:
-                        if (i1 + i) % groupsize == 0:
-                            self.quantizer.find_params(
-                                W[:, (i1 + i) : (i1 + i + groupsize)]
-                            )
-                    else:
-                        idx = i1 + i
-                        if actorder:
-                            idx = perm[idx]
-                        self.quantizer = groups[idx // groupsize]
+                    q, _, _ = self.quantizer.fake_quantize(w.unsqueeze(1))
+                    q = q.flatten()
+                    Q1[:, i] = q
 
-                q, _, _ = self.quantizer.fake_quantize(w.unsqueeze(1))
-                q = q.flatten()
-                Q1[:, i] = q
+                    Losses1[:, i] = (w - q) ** 2 / d**2
 
-                Losses1[:, i] = (w - q) ** 2 / d**2
+                    err1 = (w - q) / d
+                    W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                    Err1[:, i] = err1
 
-                err1 = (w - q) / d
-                W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
-                Err1[:, i] = err1
+                Q[:, i1:i2] = Q1
+                Losses[:, i1:i2] = Losses1 / 2
 
-            Q[:, i1:i2] = Q1
-            Losses[:, i1:i2] = Losses1 / 2
-
-            W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
-
+                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+        else:
+            # TODO: Implement blockwise GPTQ here
+            for i1 in range(0, self.columns, blocksize):
+                i2 = min(i1 + blocksize, self.columns)
+                count = i2 - i1
+                
+                W1 = W[:, i1:i2].clone()
+                Q1 = torch.zeros_like(W1)
+                Err1 = torch.zeros_like(W1)
+                Losses1 = torch.zeros_like(W1)
+                Hinv1 = Hinv[i1:i2, i1:i2]
+                
+                W1_orig_shape = W1.shape
+                q, _, _ = self.quantizer.fake_quantize(W1.flatten().unsqueeze(1))
+                Q1 = q.reshape(W1_orig_shape)
+                
+                for i in range(count):
+                    Err1[:, i] = (W1[:, i] - Q1[:, i]) / Hinv1[i, i]
+                    Losses1[:, i] = 0.5 * (W1[:, i] - Q1[:, i]) ** 2 / Hinv1[i, i] ** 2
+                
+                Q[:, i1:i2] = Q1
+                Losses[:, i1:i2] = Losses1
+                
+                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+                
         torch.cuda.synchronize()
 
         if actorder:
@@ -278,7 +307,8 @@ def gptq_fwrd(model, dataloader, dev, args):
                     if args.w_sbvr:
                         gptq[name].quantizer = sbvr_wrapper(encoder_config={
                             "num_sums": layer_weight_bits,
-                            "bvr_len": 128,
+                            "bvr_len": args.bvr_groupsize,
+                            "enable_blockwise_gptq": args.gptq_blockwise,
                         }, verbose=1)
                     else:
                         gptq[name].quantizer = quant_utils.WeightQuantizer()
@@ -314,7 +344,12 @@ def gptq_fwrd(model, dataloader, dev, args):
                         path = args.save_qmodel_path + f"/sbvr_layer_{i}_{name}.pt"
                         if os.path.exists(path):
                             gptq[name].quantizer = sbvr.load(path, device=dev)
-                            q = gptq[name].quantizer.decode().T
+                            
+                            if not args.enable_gptq_blockwise:
+                                q = gptq[name].quantizer.decode().T
+                            else:
+                                q = gptq[name].quantizer.decode()
+                                
                             gptq[name].layer.weight.data = \
                                         q.to(gptq[name].layer.weight.data.dtype)
                             gptq[name].quantizer = None
@@ -325,6 +360,8 @@ def gptq_fwrd(model, dataloader, dev, args):
                                 actorder=args.act_order,
                                 static_groups=False,
                                 export_to_et=args.export_to_et,
+                                blockwise_only=args.gptq_blockwise,
+                                blocksize=args.bvr_groupsize
                             )
                             print(utils.y_str(f"Rank {local_rank}: ") +
                                 f"Processed {gptq[name].quantizer.bvr_idx} BVRs in "

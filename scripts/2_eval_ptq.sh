@@ -36,6 +36,8 @@ torchrun --nnodes=1 --nproc_per_node=$5 ptq.py \
 --k_groupsize 128 \
 --v_groupsize 128 \
 --w_sbvr \
+--bvr_groupsize 128 \
+--gptq_blockwise \
 --rotate \
 --rotate_mode "hadamard" \
 --save_qmodel_path "$path" \

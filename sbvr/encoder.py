@@ -27,6 +27,7 @@ class sbvr_encoder():
         self.extend_ratio = kwargs.get("extend_ratio", 1.2)
         self.verbose_level = kwargs.get("verbose_level", 0)
         self.compute_dtype = kwargs.get("compute_dtype", torch.float16)
+        self.enable_blockwise_gptq = kwargs.get("enable_blockwise_gptq", False)
         
     def _get_conf_str(self):
         conf_str = g_str("SBVR Encoder Config:") + \

@@ -57,6 +57,20 @@ def parser_gen():
         default=False,
         help="Use SBVR for weight quantization."
     )
+    
+    parser.add_argument(
+        "--gptq_blockwise",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use blockwise quantization for GPTQ."
+    )
+    
+    parser.add_argument(
+        "--bvr_groupsize",
+        type=int,
+        default=128,
+        help="Set bvr groupsize fro sbvr decoding"
+    )
 
     # Rotation Arguments
     parser.add_argument(

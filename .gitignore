@@ -15,3 +15,6 @@ eval/
 sbvr_models/
 sbvr_utils/
 cutlass/
+
+data/
+dummy/

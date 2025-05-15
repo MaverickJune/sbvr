@@ -54,6 +54,9 @@ class sbvr(torch.nn.Module):
             self.bvr_len = self.encoder.bvr_len
             self.compute_dtype = self.encoder.compute_dtype
             self.bvr_dtype = self.encoder.bvr_dtype
+            
+            self.enable_blockwise_gptq = self.encoder.enable_blockwise_gptq
+            
             if self.num_sums > 11 and self.compute_dtype == torch.float16:
                 raise UserWarning(
                     r_str("Warning: compute_dtype float16 does not have "
@@ -130,6 +133,8 @@ class sbvr(torch.nn.Module):
 
         # Pad the data to the nearest multiple of bvr_len
         if self.original_data_shape != self._get_padded_data_shape():
+            raise ValueError(
+                r_str("Data shape must be a multiple of bvr_len"))
             data_padded = torch.zeros(self._get_padded_data_shape(), 
                                       dtype=self.compute_dtype, 
                                       device=data.device)
@@ -182,6 +187,12 @@ class sbvr(torch.nn.Module):
         return decoded_data
             
     def finalize_encoding(self):
+        if self.enable_blockwise_gptq:
+            # reshape self.coeff_sel and coeff_idx
+            self.coeff_idx = self.coeff_idx.reshape(-1, self.padded_data_shape[0]).transpose(0, 1).contiguous().flatten()
+            target_sel_shape = (self.padded_data_shape[-1] // self.bvr_len, self.padded_data_shape[0], self.bvr_len)
+            self.coeff_sel = self.coeff_sel.reshape(target_sel_shape).permute(1, 0, 2).contiguous().flatten()
+        
         bvr = self._change_coeff_sel_to_bvr()
         bvr = bvr.view(self.num_sums, -1, self._get_padded_data_shape()[-1] // \
                                                 self._get_bvr_num_bits())
