@@ -16,6 +16,7 @@ from eval_utils.main import ptq_model
 from eval_utils.modeling_llama import LlamaForCausalLM
 from utils import data_utils, eval_utils, utils
 from utils.process_args import process_args_ptq
+from utils.model_utils import capture_layer_io, get_layer_io_save_path
 
 import sys
 
@@ -49,43 +50,35 @@ def train() -> None:
     if process_word_embeddings:
         model.lm_head.weight.data = model.model.embed_tokens.weight.data.clone()
     model.cuda()
-
     model = ptq_model(ptq_args, model, model_args)
-    if ptq_args.profile_input:
-        # TODO: profile the hidden states of the model
-        print(model)
-        print("printed out the model")
-        sys.exit(0)
-        
-        pass
-    else:
-        model.seqlen = training_args.model_max_length
-        if local_rank == 0:
-            log.info("Model PTQ completed {}".format(model))
-            log.info("Start to load tokenizer...")
-            tokenizer = LlamaTokenizerFast.from_pretrained(
-                pretrained_model_name_or_path=model_args.input_model,
-                cache_dir=training_args.cache_dir,
-                model_max_length=training_args.model_max_length,
-                padding_side="right",
-                use_fast=True,
-                add_eos_token=False,
-                add_bos_token=False,
-                token=model_args.access_token,
-            )
-            log.info("Complete tokenizer loading...")
-            model.config.use_cache = False
+    
+    model.seqlen = training_args.model_max_length
+    if local_rank == 0:
+        log.info("Model PTQ completed {}".format(model))
+        log.info("Start to load tokenizer...")
+        tokenizer = LlamaTokenizerFast.from_pretrained(
+            pretrained_model_name_or_path=model_args.input_model,
+            cache_dir=training_args.cache_dir,
+            model_max_length=training_args.model_max_length,
+            padding_side="right",
+            use_fast=True,
+            add_eos_token=False,
+            add_bos_token=False,
+            token=model_args.access_token,
+        )
+        log.info("Complete tokenizer loading...")
+        model.config.use_cache = False
 
-            testloader = data_utils.get_wikitext2(
-                seed=ptq_args.seed,
-                seqlen=2048,
-                tokenizer=tokenizer,
-                eval_mode=True,
-            )
+        testloader = data_utils.get_wikitext2(
+            seed=ptq_args.seed,
+            seqlen=2048,
+            tokenizer=tokenizer,
+            eval_mode=True,
+        )
 
-            dataset_ppl = eval_utils.evaluator(model, 
-                                            testloader, utils.DEV, ptq_args)
-            log.info("wiki2 ppl is: {}".format(dataset_ppl))
+        dataset_ppl = eval_utils.evaluator(model, 
+                                        testloader, utils.DEV, ptq_args)
+        log.info("wiki2 ppl is: {}".format(dataset_ppl))
         
     dist.barrier()
     dist.destroy_process_group()

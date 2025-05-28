@@ -84,9 +84,9 @@ def evaluator(model, testenc, dev, args):
         layer = layers[i].to(dev)
 
         # Dump the layer input and output
-        if args.capture_layer_io and args.layer_idx == i:
-            captured_io = model_utils.capture_layer_io(layer, inps)
-            save_path = model_utils.get_layer_io_save_path(args)
+        if args.capture_layer_io:
+            captured_io = model_utils.capture_layer_io(layer, torch.cat(inps, dim=0), attention_mask, position_ids)
+            save_path = model_utils.get_layer_io_save_path(args, i)
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             torch.save(captured_io, save_path)
             logging.info(f"Dumped layer input and output to: {save_path}")

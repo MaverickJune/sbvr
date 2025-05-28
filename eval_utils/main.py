@@ -18,7 +18,6 @@ from utils.convert_to_executorch import (
     write_model_llama,
 )
 
-
 def ptq_model(args, model, model_args=None):
     transformers.set_seed(args.seed)
     model.eval()
@@ -52,7 +51,7 @@ def ptq_model(args, model, model_args=None):
                 not args.save_qmodel_path
             ), "Cannot save a quantized model if it is already loaded!"
             print("Load quantized model from ", args.load_qmodel_path)
-            save_dict = torch.load(args.load_qmodel_path)
+            save_dict = torch.load(args.load_qmodel_path + "/quantized_model.pt")
             model.load_state_dict(save_dict["model"])
         elif not args.w_rtn:  # GPTQ Weight Quantization
             trainloader = data_utils.get_wikitext2(
@@ -87,7 +86,10 @@ def ptq_model(args, model, model_args=None):
                 save_dict = sanitize_checkpoint_from_spinquant(
                     save_dict, group_size=args.w_groupsize
                 )
-            torch.save(save_dict, args.save_qmodel_path + "/quantized_model.pt")
+            local_rank = utils.get_local_rank()
+            if local_rank == 0:
+                print("saving quantized model to {}".format(args.save_qmodel_path + "/quantized_model.pt"))
+                torch.save(save_dict, args.save_qmodel_path + "/quantized_model.pt")
 
     # Add Input Quantization
     if args.a_bits < 16 or args.v_bits < 16:

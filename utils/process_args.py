@@ -59,6 +59,13 @@ def parser_gen():
     )
     
     parser.add_argument(
+        "--save_path",
+        type=str,
+        default=None,
+        help="Save the input and output of the model to the specified path!",
+    )
+    
+    parser.add_argument(
         "--gptq_blockwise",
         action=argparse.BooleanOptionalAction,
         default=False,
