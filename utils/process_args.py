@@ -71,6 +71,13 @@ def parser_gen():
         default=128,
         help="Set bvr groupsize fro sbvr decoding"
     )
+    
+    parser.add_argument(
+        "--profile_input",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Profile the hidden states of the model to find the coeff set for input sbvr"
+    )
 
     # Rotation Arguments
     parser.add_argument(

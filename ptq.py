@@ -17,6 +17,8 @@ from eval_utils.modeling_llama import LlamaForCausalLM
 from utils import data_utils, eval_utils, utils
 from utils.process_args import process_args_ptq
 
+import sys
+
 log: Logger = utils.get_logger("spinquant")
 
 
@@ -49,35 +51,44 @@ def train() -> None:
     model.cuda()
 
     model = ptq_model(ptq_args, model, model_args)
-    model.seqlen = training_args.model_max_length
-    if local_rank == 0:
-        log.info("Model PTQ completed {}".format(model))
-        log.info("Start to load tokenizer...")
-        tokenizer = LlamaTokenizerFast.from_pretrained(
-            pretrained_model_name_or_path=model_args.input_model,
-            cache_dir=training_args.cache_dir,
-            model_max_length=training_args.model_max_length,
-            padding_side="right",
-            use_fast=True,
-            add_eos_token=False,
-            add_bos_token=False,
-            token=model_args.access_token,
-        )
-        log.info("Complete tokenizer loading...")
-        model.config.use_cache = False
+    if ptq_args.profile_input:
+        # TODO: profile the hidden states of the model
+        print(model)
+        print("printed out the model")
+        sys.exit(0)
+        
+        pass
+    else:
+        model.seqlen = training_args.model_max_length
+        if local_rank == 0:
+            log.info("Model PTQ completed {}".format(model))
+            log.info("Start to load tokenizer...")
+            tokenizer = LlamaTokenizerFast.from_pretrained(
+                pretrained_model_name_or_path=model_args.input_model,
+                cache_dir=training_args.cache_dir,
+                model_max_length=training_args.model_max_length,
+                padding_side="right",
+                use_fast=True,
+                add_eos_token=False,
+                add_bos_token=False,
+                token=model_args.access_token,
+            )
+            log.info("Complete tokenizer loading...")
+            model.config.use_cache = False
 
-        testloader = data_utils.get_wikitext2(
-            seed=ptq_args.seed,
-            seqlen=2048,
-            tokenizer=tokenizer,
-            eval_mode=True,
-        )
+            testloader = data_utils.get_wikitext2(
+                seed=ptq_args.seed,
+                seqlen=2048,
+                tokenizer=tokenizer,
+                eval_mode=True,
+            )
 
-        dataset_ppl = eval_utils.evaluator(model, 
-                                           testloader, utils.DEV, ptq_args)
-        log.info("wiki2 ppl is: {}".format(dataset_ppl))
+            dataset_ppl = eval_utils.evaluator(model, 
+                                            testloader, utils.DEV, ptq_args)
+            log.info("wiki2 ppl is: {}".format(dataset_ppl))
+        
     dist.barrier()
-
+    dist.destroy_process_group()
 
 if __name__ == "__main__":
     train()

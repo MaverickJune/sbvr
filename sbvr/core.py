@@ -133,8 +133,8 @@ class sbvr(torch.nn.Module):
 
         # Pad the data to the nearest multiple of bvr_len
         if self.original_data_shape != self._get_padded_data_shape():
-            raise ValueError(
-                r_str("Data shape must be a multiple of bvr_len"))
+            # raise ValueError(
+            #     r_str("Data shape must be a multiple of bvr_len"))
             data_padded = torch.zeros(self._get_padded_data_shape(), 
                                       dtype=self.compute_dtype, 
                                       device=data.device)

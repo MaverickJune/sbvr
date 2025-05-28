@@ -41,9 +41,16 @@ class sbvr_wrapper(sbvr.sbvr):
             self.prepare_encoding(x)
         return
     
-    def fake_quantize(self, x):
+    def fake_quantize(self, x, enable_blockwise_gptq=False, x_orig_shape=None):
         if not hasattr(self, "bvr_idx"):
             self.bvr_idx = 0
+            
+        if enable_blockwise_gptq:
+            if x.orig_shape[-1] % self.bvr_len != 0:
+                padded_len = (x.orig_shape[-1] + self.bvr_len - 1) // self.bvr_len * self.bvr_len - x.orig_shape[-1]
+                pad = torch.zeros(x.orig_shape[0], padded_len, device=x.device)
+                x = torch.cat([x, pad], dim=-1).reshape(-1, 1)
+            
         q = torch.zeros_like(x.flatten())
         for i in range(0, x.shape[0], self.bvr_len):
             segment = x[i:i + self.bvr_len]
@@ -175,6 +182,7 @@ class GPTQ:
                 W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
         else:
             # TODO: Implement blockwise GPTQ here
+            print("Blockwise GPTQ activated")
             for i1 in range(0, self.columns, blocksize):
                 i2 = min(i1 + blocksize, self.columns)
                 count = i2 - i1
@@ -186,7 +194,7 @@ class GPTQ:
                 Hinv1 = Hinv[i1:i2, i1:i2]
                 
                 W1_orig_shape = W1.shape
-                q, _, _ = self.quantizer.fake_quantize(W1.flatten().unsqueeze(1))
+                q, _, _ = self.quantizer.fake_quantize(W1, enable_blockwise_gptq=True, x_orig_shape=W1_orig_shape)
                 Q1 = q.reshape(W1_orig_shape)
                 
                 for i in range(count):
@@ -345,7 +353,7 @@ def gptq_fwrd(model, dataloader, dev, args):
                         if os.path.exists(path):
                             gptq[name].quantizer = sbvr.load(path, device=dev)
                             
-                            if not args.enable_gptq_blockwise:
+                            if not args.gptq_blockwise:
                                 q = gptq[name].quantizer.decode().T
                             else:
                                 q = gptq[name].quantizer.decode()
