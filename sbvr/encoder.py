@@ -330,3 +330,38 @@ class sbvr_encoder():
                 self.mse_history.append(new_mse)
  
         return best_coeff_idx, best_coeff_sel
+    
+    def _data_diff_mse(self, data, candidate_matrix):
+        n_ss_row = candidate_matrix.shape[0]
+        n_ss_col = candidate_matrix.shape[1]
+        
+        data = data.view(1, -1, 1)
+        candidate_matrix = candidate_matrix.view(n_ss_row, 1, n_ss_col) 
+        
+        diff = (data - candidate_matrix)**2
+        diff_selected, coeff_comb_indices = diff.min(dim=-1)
+        mse = diff_selected.to(torch.float32).mean(dim=-1)
+        
+        return mse 
+    
+    def _get_mse_for_the_coeff_set(self, data, search_matrix):
+        candidate_matrix = search_matrix @ self._get_bin_combs().T
+        mse = self._data_diff_mse(data, candidate_matrix)
+        
+        return mse
+    
+    def get_input_data_mse_from_cache(self, data):
+        coeff_search_space = self.coeff_cache[:self.num_coeff_cache_lines]
+        len_search_space = coeff_search_space.shape[0]
+        coeff_mse = torch.zeros(len_search_space, device=data.device, dtype=data.dtype)
+        
+        for search_start in range(0, len_search_space, self.search_batch_size):
+            torch.cuda.empty_cache()
+            search_end = min(search_start + self.search_batch_size, len_search_space)
+            coeff_list = coeff_search_space[search_start:search_end]
+            mse = self._get_mse_for_the_coeff_set(data, coeff_list)
+            coeff_mse[search_start:search_end] = mse
+            
+        return coeff_mse
+        
+        

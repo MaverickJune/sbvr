@@ -34,8 +34,8 @@ class sbvr_wrapper(sbvr.sbvr):
     def configure(self):
         return
     
-    def find_params(self, x, transpose=False):
-        if not transpose:
+    def find_params(self, x, transpose=True):
+        if transpose:
             self.prepare_encoding(x.T)
         else:
             self.prepare_encoding(x)
@@ -101,7 +101,7 @@ class GPTQ:
         W = self.layer.weight.data.clone()
         
         if not self.quantizer.ready():
-            self.quantizer.find_params(W, transpose=blockwise_only)
+            self.quantizer.find_params(W, transpose = not blockwise_only)
         W = W.float()
 
         H = self.H

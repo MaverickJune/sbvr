@@ -3,7 +3,8 @@ import os
 from matplotlib import pyplot as plt
 import numpy as np
 from scipy.stats import norm
-from utils.utils import cleanup_memory
+from utils.utils import cleanup_memory, set_seed
+import sbvr
 
 class input_profiler:
     def __init__(self, model_name, w_bits, a_bits, kv_bits,
@@ -27,7 +28,8 @@ class input_profiler:
         model_name = model_name.replace("/", "_")
         return f"{model_name}_{w_bits}_{a_bits}_{kv_bits}"
     
-    def sample_inputs(self, group_size=128, n_samples_per_layer=20, save_input_dist=False):
+    def sample_inputs(self, group_size=128, n_samples_per_layer=20, save_input_dist=False,
+                      save_name=f"input_dist_sample.pt"):
         n_samples_per_item = n_samples_per_layer // 5 # (k_proj, o_proj, gate_proj, down_proj, v_proj)
         distribution_board = torch.zeros(self.n_layers, group_size * n_samples_per_layer)
         
@@ -61,7 +63,7 @@ class input_profiler:
             cleanup_memory()
          
         if save_input_dist:
-            torch.save(distribution_board, os.path.join(self.save_path, f"input_dist_sample.pt"))
+            torch.save(distribution_board, os.path.join(self.save_path, save_name))
         return distribution_board
     
     def draw_input_distribution(self, input_dist: torch.Tensor = None):
@@ -79,18 +81,56 @@ class input_profiler:
         mu  = float(input_dist.mean())
         std = float(input_dist.std())
         xs  = np.linspace(mu - 4*std, mu + 4*std, 400)
-        plt.plot(xs, norm.pdf(xs, mu, std), lw=2)   # reference curve
+        # plt.plot(xs, norm.pdf(xs, mu, std), lw=2)   # reference curve
 
-        plt.title("Input Distribution vs. Best-Fit Normal")
+        plt.title("Input Distribution")
         plt.xlabel("Value")
         plt.ylabel("Density")
         plt.savefig(fig_save_path)
         plt.close()
+        
+    def get_sbvr_coeff_set_for_input(self, coeff_set_size: int = 4, 
+                                     num_sums: int = 8,
+                                     bvr_len: int = 128,
+                                     device: str = "cuda:0",
+                                     save_coeff_set: bool = False,
+                                     save_input_dist: bool = False,
+                                     input_dist_samples: list = None):
+        
+        if input_dist_samples is not None:
+            if len(input_dist_samples) != coeff_set_size:
+                raise ValueError("input_dist_samples must be a list of length coeff_set_size")
+            else:
+                input_dist_samples = [torch.load(os.path.join(self.save_path, f)).to(device) for f in input_dist_samples]
+        else:
+            input_dist_samples = [self.sample_inputs(group_size=128, save_input_dist=save_input_dist, save_name=f"input_dist_sample_{i}.pt").to(device) for i in range(coeff_set_size)]
+            
+        coeff_set = []
+        for i in range(coeff_set_size):
+            print(f"selecting coeff set {i}...")
+            quantizer = sbvr.sbvr(
+                encoder_config={
+                    "num_sums": num_sums,
+                    "bvr_len": bvr_len
+                },
+                verbose_level=1
+            )
+            input_dist = input_dist_samples[i]
+            coeff = quantizer._batched_input_encode(input_dist)
+            coeff_set.append(coeff)
+        
+        if save_coeff_set:
+            coeff_set_save_path = os.path.join(self.save_path, f"input_coeff_set.pt")
+            torch.save(coeff_set, coeff_set_save_path)
+        
+        return coeff_set
     
 if __name__ == "__main__":
     profiler = input_profiler("meta-llama/Llama-3.2-1B", 4, 16, 16)
-    input_dist = profiler.sample_inputs()
-    profiler.draw_input_distribution(input_dist)
-            
+    
+    # input_dist = profiler.sample_inputs()
+    # input_dist = torch.load(os.path.join(profiler.save_path, f"input_dist_sample.pt"))
+    # profiler.draw_input_distribution(input_dist)
+    # coeff_set = profiler.get_sbvr_coeff_set_for_input(coeff_set_size=4, num_sums=8, bvr_len=128, device="cuda:0", save_coeff_cache=True)
         
         

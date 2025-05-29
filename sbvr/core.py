@@ -156,6 +156,42 @@ class sbvr(torch.nn.Module):
         return data_padded
     
     @torch.inference_mode()
+    def _batched_input_encode(self, data):
+        # First, apply sbvr encoding to the data to fill the coeff cache
+        data_padded = self.prepare_encoding(data)
+        
+        if self.verbose_level > 0:
+            print(self.encoder._get_conf_str())
+        
+        if self.verbose_level > -1:
+            group_iter = tqdm(range(self.coeff_idx.shape[0]), ncols=80, 
+                      desc=b_str("Encoding SBVR groups"), unit="g")
+        else:
+            group_iter = range(self.coeff_idx.shape[0])
+        
+        for i in group_iter:
+            group_data = data_padded.flatten()[i * self.bvr_len: 
+                                                (i + 1) * self.bvr_len]
+            self.iterative_encoding(group_data, i)
+            
+        # Let the coeff set in the self.cache be the candidates
+        print(r_str("Selecting the best coeff set from the cache ..."))
+        
+        coeff_cache_mse = torch.zeros(self.encoder.num_coeff_cache_lines, device=data.device, dtype=data.dtype)
+        for i in group_iter:
+            group_data = data_padded.flatten()[i * self.bvr_len: (i + 1) * self.bvr_len]
+            coeff_cache_mse_partial = self.encoder.get_input_data_mse_from_cache(group_data)
+            coeff_cache_mse += coeff_cache_mse_partial
+        coeff_cache_mse = coeff_cache_mse / self.encoder.group_idx
+        min_idx = coeff_cache_mse.argmin(dim=-1)
+        best_mse = coeff_cache_mse[min_idx]
+        best_coeff = self.encoder.coeff_cache[min_idx]
+        
+        print(b_str("Best MSE: ") + f"{best_mse:.4e}")
+        
+        return best_coeff
+            
+    @torch.inference_mode()
     def _batched_encode(self, data):
         data_padded = self.prepare_encoding(data)
         
