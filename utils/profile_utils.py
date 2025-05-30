@@ -198,6 +198,21 @@ class input_profiler:
             
         return profile_results
     
+    def printout_profile_results(self, profile_results: dict = {}, profile_results_path: str = None):
+        if profile_results_path is not None:
+            profile_results = torch.load(profile_results_path)
+        if profile_results_path is None and profile_results == {}:
+            raise ValueError("profile_results or profile_results_path must be provided")
+        for key in profile_results.keys():
+            layer_idx, type = key.split("_", 1)
+            print(f"layer {layer_idx} {type}")
+            print(r_str("Errors:   ") + 
+                y_str("MSE:  ") + f"{profile_results[key]['mse']:.4e}" + ", " +
+                y_str("ABS Mean: ") + f"{torch.mean(profile_results[key]['error'].abs()):.4e}" + ", " +
+                y_str("Max: ") + f"{profile_results[key]['max_error']:.4e}" + ", " +
+                y_str("Min: ") + f"{profile_results[key]['min_error']:.4e}" + ", " +
+                y_str("Std. Dev.: ") + f"{profile_results[key]['std_dev']:.4e}")
+    
 if __name__ == "__main__":
     profiler = input_profiler("meta-llama/Llama-3.2-1B", 4, 16, 16)
     
@@ -205,9 +220,11 @@ if __name__ == "__main__":
     # input_dist = torch.load(os.path.join(profiler.save_path, f"input_dist_sample.pt"))
     # profiler.draw_input_distribution(input_dist)
     # coeff_set = profiler.get_sbvr_coeff_set_for_input(coeff_set_size=4, num_sums=8, bvr_len=128, device="cuda:0", save_coeff_cache=True)
-    coeff_set_path = os.path.join(profiler.save_path, f"input_coeff_set_info.pt")
-    profile_results = profiler.test_sbvr_to_inputs(coeff_set_path=coeff_set_path, save_profile_results=True)
-    print(profile_results)
+    # coeff_set_path = os.path.join(profiler.save_path, f"input_coeff_set_info.pt")
+    # profile_results = profiler.test_sbvr_to_inputs(coeff_set_path=coeff_set_path, save_profile_results=True)
+    # print(profile_results)
+    profile_results_path = os.path.join(profiler.save_path, f"profile_results.pt")
+    profiler.printout_profile_results(profile_results_path=profile_results_path)
     
         
         
