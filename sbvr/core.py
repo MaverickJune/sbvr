@@ -190,6 +190,33 @@ class sbvr(torch.nn.Module):
         print(b_str("Best MSE: ") + f"{best_mse:.4e}")
         
         return best_coeff
+    
+    @torch.inference_mode()
+    def _batched_encode_from_given_coeff_set(self, data, coeff_set):
+        if not isinstance(coeff_set, torch.Tensor):
+            raise ValueError(r_str("coeff_set must be a torch.Tensor"))
+        if coeff_set.shape[-1] != self.num_sums:
+            raise ValueError(r_str("coeff_set must have the same number of columns as the num_sums"))
+        if coeff_set.dtype != self.compute_dtype:
+            raise ValueError(r_str("coeff_set must have the same dtype as the compute_dtype"))
+        
+        data_padded = self.prepare_encoding(data)
+        if self.verbose_level > -1:
+            group_iter = tqdm(range(self.coeff_idx.shape[0]), ncols=80, 
+                      desc=b_str("Encoding SBVR groups"), unit="g")
+        else:
+            group_iter = range(self.coeff_idx.shape[0])
+        
+        for i in group_iter:
+            group_data = data_padded.flatten()[i * self.bvr_len: 
+                                                (i + 1) * self.bvr_len]
+            self.iterative_encoding_from_given_coeff_set(group_data, coeff_set, i)
+        
+        # forcefully update cache info to integrate the code
+        self.encoder.coeff_cache = coeff_set
+        self.encoder.num_coeff_cache_lines = coeff_set.shape[0]
+        
+        self.finalize_encoding(input_sbvr_mode=True)
             
     @torch.inference_mode()
     def _batched_encode(self, data):
@@ -221,8 +248,17 @@ class sbvr(torch.nn.Module):
         decoded_data = all_points[coeff_sel]
         # print(f"Decoded data: {decoded_data}")
         return decoded_data
-            
-    def finalize_encoding(self):
+    
+    def iterative_encoding_from_given_coeff_set(self, data, coeff_set, idx):
+        coeff_idx, coeff_sel = \
+                self.encoder.encode_data_from_given_coeff_set(data.to(self.compute_dtype), coeff_set)
+        self.coeff_idx[idx] = coeff_idx
+        self.coeff_sel[idx * self.bvr_len:(idx + 1) * self.bvr_len] = coeff_sel
+        all_points = self._get_all_points(coeff_set[coeff_idx])
+        decoded_data = all_points[coeff_sel]
+        return decoded_data
+        
+    def finalize_encoding(self, input_sbvr_mode=False):
         if self.enable_blockwise_gptq:
             # reshape self.coeff_sel and coeff_idx
             self.coeff_idx = self.coeff_idx.reshape(-1, self.padded_data_shape[0]).transpose(0, 1).contiguous().flatten()
@@ -248,9 +284,10 @@ class sbvr(torch.nn.Module):
         self.coeff_cache = torch.nn.Parameter(coeff_cache, requires_grad=False)
         
         if self.verbose_level > 0:
-            print(b_str("Encoding complete."))
-            print(self.encoder._get_result_str())
-            print(self.get_sbvr_info())       
+            if not input_sbvr_mode:
+                print(b_str("Encoding complete."))
+                print(self.encoder._get_result_str())
+                print(self.get_sbvr_info())       
         del self.encoder
             
     def _dec2bin(self, x, bits):
@@ -370,7 +407,8 @@ class sbvr(torch.nn.Module):
             str(self.input_num_sums) + \
         y_str("\n\tInput Coefficient Shape: ") + \
             str(self.input_coeff.shape if self.input_coeff is not None 
-                else "Input Coefficient not set") 
+                else "Input Coefficient not set")
+            
         return info_str
     
 def mm_T(lhs, rhs, bias):

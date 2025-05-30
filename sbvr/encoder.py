@@ -331,6 +331,17 @@ class sbvr_encoder():
  
         return best_coeff_idx, best_coeff_sel
     
+    def encode_data_from_given_coeff_set(self, data, coeff_set):
+        min_mse = float("inf")
+        self.group_idx += 1
+        coeff_search_space = coeff_set
+        cutoff_mse = self.acceptable_mse
+        
+        min_mse, best_coeff_idx, best_coeff_sel = \
+                self._search_coeff_bias_space(coeff_search_space, 
+                                              data, cutoff_mse)
+        return best_coeff_idx, best_coeff_sel
+    
     def _data_diff_mse(self, data, candidate_matrix):
         n_ss_row = candidate_matrix.shape[0]
         n_ss_col = candidate_matrix.shape[1]

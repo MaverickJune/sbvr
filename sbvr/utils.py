@@ -13,7 +13,42 @@ def y_str(s):
 def b_str(s):
     return "\033[94m" + str(s) + "\033[0m"
 
-
+def get_errors(tensor1, tensor2):
+    if tensor1.shape != tensor2.shape:
+        raise ValueError("Tensors must have the same shape")
+    
+    errors = tensor1 - tensor2
+    mse = torch.mean(errors ** 2).item()
+    max_error = torch.max(errors).item()
+    min_error = torch.min(errors).item()
+    std_dev = torch.std(errors).item()
+    
+    return errors, mse, max_error, min_error, std_dev
+        
+def print_errors(tensor1, tensor2):
+    if tensor1.shape != tensor2.shape:
+        raise ValueError(f"Tensors must have the same shape: "
+                         f"{tensor1.shape} vs {tensor2.shape}")
+    print(g_str("Tensor 1: ") +
+          y_str("Mean: ") + f"{torch.mean(tensor1):.4e}" + ", " +
+          y_str("ABS Mean: ") + f"{torch.mean(tensor1.abs()):.4e}" + ", " +
+          y_str("Max: ") + f"{torch.max(tensor1):.4e}" + ", " +
+          y_str("Min: ") + f"{torch.min(tensor1):.4e}" + ", " +
+          y_str("Std. Dev.: ") + f"{torch.std(tensor1):.4e}")
+    print(g_str("Tensor 2: ") +
+          y_str("Mean: ") + f"{torch.mean(tensor2):.4e}" + ", " +
+          y_str("ABS Mean: ") + f"{torch.mean(tensor2.abs()):.4e}" + ", " +
+          y_str("Max: ") + f"{torch.max(tensor2):.4e}" + ", " +
+          y_str("Min: ") + f"{torch.min(tensor2):.4e}" + ", " +
+          y_str("Std. Dev.: ") + f"{torch.std(tensor2):.4e}")
+    errors, mse, max_error, min_error, std_dev = get_errors(tensor1, tensor2)
+    print(r_str("Errors:   ") + 
+          y_str("MSE:  ") + f"{mse:.4e}" + ", " +
+          y_str("ABS Mean: ") + f"{torch.mean(errors.abs()):.4e}" + ", " +
+          y_str("Max: ") + f"{max_error:.4e}" + ", " +
+          y_str("Min: ") + f"{min_error:.4e}" + ", " +
+          y_str("Std. Dev.: ") + f"{std_dev:.4e}\n")
+    
 class sbvr_serialized():
     def __init__(self, 
                  num_sums: int,

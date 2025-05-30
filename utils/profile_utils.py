@@ -1,10 +1,12 @@
 import torch
 import os
+import sys
 from matplotlib import pyplot as plt
 import numpy as np
 from scipy.stats import norm
 from utils.utils import cleanup_memory, set_seed
 import sbvr
+from sbvr.utils import print_errors, get_errors, r_str, y_str
 
 class input_profiler:
     def __init__(self, model_name, w_bits, a_bits, kv_bits,
@@ -116,14 +118,85 @@ class input_profiler:
                 verbose_level=1
             )
             input_dist = input_dist_samples[i]
-            coeff = quantizer._batched_input_encode(input_dist)
+            coeff = quantizer._batched_encode(input_dist)
             coeff_set.append(coeff)
+        
+        coeff_set_info = {
+            "num_sums": num_sums,
+            "bvr_len": bvr_len,
+            "device": device,
+            "coeff_set": torch.stack(coeff_set, dim=0).to(quantizer.compute_dtype).to(device)
+        }
         
         if save_coeff_set:
             coeff_set_save_path = os.path.join(self.save_path, f"input_coeff_set.pt")
-            torch.save(coeff_set, coeff_set_save_path)
+            torch.save(coeff_set_info, coeff_set_save_path)
         
-        return coeff_set
+        return coeff_set_info
+    
+    def encode_input_from_coeff_set(self, input: torch.Tensor, 
+                                    coeff_set_info: dict = {}, 
+                                    coeff_set_path: str = None):
+        if coeff_set_info != {} and coeff_set_path != None:
+            raise ValueError("coeff_set_info and coeff_set_path cannot both be provided")
+        if coeff_set_info == {} and coeff_set_path is None:
+            raise ValueError("coeff_set_info or coeff_set_path must be provided")
+        if coeff_set_path is not None:
+            coeff_set_info = torch.load(coeff_set_path)
+        
+        device = coeff_set_info["device"]
+        num_sums = coeff_set_info["num_sums"]
+        bvr_len = coeff_set_info["bvr_len"]
+        coeff_set = coeff_set_info["coeff_set"]
+        
+        input = input.to(device)
+        quantizer = sbvr.sbvr(
+                encoder_config={
+                    "num_sums": num_sums,
+                    "bvr_len": bvr_len
+                },
+                verbose_level=1
+            )
+        quantizer._batched_encode_from_given_coeff_set(input, coeff_set)
+        decoded_tensor = quantizer.decode()
+        errors, mse, max_error, min_error, std_dev = get_errors(input, decoded_tensor)
+        return errors, mse, max_error, min_error, std_dev
+        
+    def test_sbvr_to_inputs(self, n_samples_per_input_type: int = 256,
+                            coeff_set_info={}, 
+                            coeff_set_path=None,
+                            save_profile_results=False):
+        input_types = ["k_proj", "o_proj", "gate_proj", "down_proj", "v_proj"]
+        profile_results = {}
+        for layer_idx, layer_path in enumerate(self.input_file_paths):
+            input_info = torch.load(layer_path)
+            for type in input_types:
+                print(f"testing layer {layer_idx} {type}...")
+                io_name_flag = "input" if type in ["k_proj", "o_proj", "gate_proj", "down_proj"] else "output"
+                
+                input_info[io_name_flag][type] = input_info[io_name_flag][type].reshape(-1, input_info[io_name_flag][type].shape[-1])
+                sample_indices = torch.randint(0, input_info[io_name_flag][type].shape[0], (n_samples_per_input_type,))
+                target_input = input_info[io_name_flag][type][sample_indices]
+                
+                error, mse, max_error, min_error, std_dev = self.encode_input_from_coeff_set(target_input, coeff_set_info, coeff_set_path)
+                profile_results[f"{layer_idx}_{type}"] = {
+                    "error": error,
+                    "mse": mse,
+                    "max_error": max_error,
+                    "min_error": min_error,
+                    "std_dev": std_dev
+                }
+                print(r_str("Errors:   ") + 
+                    y_str("MSE:  ") + f"{mse:.4e}" + ", " +
+                    y_str("ABS Mean: ") + f"{torch.mean(error.abs()):.4e}" + ", " +
+                    y_str("Max: ") + f"{max_error:.4e}" + ", " +
+                    y_str("Min: ") + f"{min_error:.4e}" + ", " +
+                    y_str("Std. Dev.: ") + f"{std_dev:.4e}\n")
+                
+        if save_profile_results:
+            torch.save(profile_results, os.path.join(self.save_path, f"profile_results.pt"))
+            
+        return profile_results
     
 if __name__ == "__main__":
     profiler = input_profiler("meta-llama/Llama-3.2-1B", 4, 16, 16)
@@ -132,5 +205,9 @@ if __name__ == "__main__":
     # input_dist = torch.load(os.path.join(profiler.save_path, f"input_dist_sample.pt"))
     # profiler.draw_input_distribution(input_dist)
     # coeff_set = profiler.get_sbvr_coeff_set_for_input(coeff_set_size=4, num_sums=8, bvr_len=128, device="cuda:0", save_coeff_cache=True)
+    coeff_set_path = os.path.join(profiler.save_path, f"input_coeff_set_info.pt")
+    profile_results = profiler.test_sbvr_to_inputs(coeff_set_path=coeff_set_path, save_profile_results=True)
+    print(profile_results)
+    
         
         
