@@ -213,6 +213,7 @@ class input_profiler:
                 y_str("Min: ") + f"{profile_results[key]['min_error']:.4e}" + ", " +
                 y_str("Std. Dev.: ") + f"{profile_results[key]['std_dev']:.4e}")
     
+    
 if __name__ == "__main__":
     profiler = input_profiler("meta-llama/Llama-3.2-1B", 4, 16, 16)
     
