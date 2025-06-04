@@ -136,7 +136,8 @@ class input_profiler:
     
     def encode_input_from_coeff_set(self, input: torch.Tensor, 
                                     coeff_set_info: dict = {}, 
-                                    coeff_set_path: str = None):
+                                    coeff_set_path: str = None,
+                                    enable_oneshot_encoding: bool = False):
         if coeff_set_info != {} and coeff_set_path != None:
             raise ValueError("coeff_set_info and coeff_set_path cannot both be provided")
         if coeff_set_info == {} and coeff_set_path is None:
@@ -150,22 +151,31 @@ class input_profiler:
         coeff_set = coeff_set_info["coeff_set"]
         
         input = input.to(device)
-        quantizer = sbvr.sbvr(
-                encoder_config={
-                    "num_sums": num_sums,
-                    "bvr_len": bvr_len
-                },
-                verbose_level=1
-            )
-        quantizer._batched_encode_from_given_coeff_set(input, coeff_set)
-        decoded_tensor = quantizer.decode()
+        if not enable_oneshot_encoding:
+            quantizer = sbvr.sbvr(
+                    encoder_config={
+                        "num_sums": num_sums,
+                        "bvr_len": bvr_len
+                    },
+                    verbose_level=1
+                )
+            quantizer._batched_encode_from_given_coeff_set(input, coeff_set)
+            decoded_tensor = quantizer.decode()
+        else:
+            # one-shot encoding
+            print(f"using oneshot encoding...")
+            oneshot_quantizer = sbvr.core.sbvr_input(coeff_set, bvr_len, num_sums)
+            bvr, coeff_idx = oneshot_quantizer.oneshot_input_encode(input)
+            decoded_tensor = oneshot_quantizer.decode()
+            
         errors, mse, max_error, min_error, std_dev = get_errors(input, decoded_tensor)
         return errors, mse, max_error, min_error, std_dev
         
     def test_sbvr_to_inputs(self, n_samples_per_input_type: int = 256,
                             coeff_set_info={}, 
                             coeff_set_path=None,
-                            save_profile_results=False):
+                            save_profile_results=False,
+                            enable_oneshot_encoding=False):
         input_types = ["k_proj", "o_proj", "gate_proj", "down_proj", "v_proj"]
         profile_results = {}
         for layer_idx, layer_path in enumerate(self.input_file_paths):
@@ -178,7 +188,8 @@ class input_profiler:
                 sample_indices = torch.randint(0, input_info[io_name_flag][type].shape[0], (n_samples_per_input_type,))
                 target_input = input_info[io_name_flag][type][sample_indices]
                 
-                error, mse, max_error, min_error, std_dev = self.encode_input_from_coeff_set(target_input, coeff_set_info, coeff_set_path)
+                error, mse, max_error, min_error, std_dev = self.encode_input_from_coeff_set(target_input, coeff_set_info, coeff_set_path, 
+                                                                                             enable_oneshot_encoding=enable_oneshot_encoding)
                 profile_results[f"{layer_idx}_{type}"] = {
                     "error": error,
                     "mse": mse,
@@ -224,8 +235,10 @@ if __name__ == "__main__":
     # coeff_set_path = os.path.join(profiler.save_path, f"input_coeff_set_info.pt")
     # profile_results = profiler.test_sbvr_to_inputs(coeff_set_path=coeff_set_path, save_profile_results=True)
     # print(profile_results)
-    profile_results_path = os.path.join(profiler.save_path, f"profile_results.pt")
-    profiler.printout_profile_results(profile_results_path=profile_results_path)
+    # profile_results_path = os.path.join(profiler.save_path, f"profile_results.pt")
+    # profiler.printout_profile_results(profile_results_path=profile_results_path)
+    profiler_results = profiler.test_sbvr_to_inputs(coeff_set_path=os.path.join(profiler.save_path, f"input_coeff_set_info.pt"), save_profile_results=False, 
+                                                    enable_oneshot_encoding=True)
     
         
         

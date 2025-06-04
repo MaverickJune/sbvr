@@ -440,6 +440,7 @@ class sbvr_input:
         self.bvr_len = bvr_len
         self.num_sums = num_sums
         self.bvr_dtype = torch.uint32
+        self.conversion_complete = False
         
     def _get_bvr_num_bits(self):
         if not hasattr(self, 'bvr_num_bits'):
@@ -456,8 +457,16 @@ class sbvr_input:
         mask = 2 ** torch.arange(bits - 1, -1, -1).to(b.device, b.dtype)
         return torch.sum(mask * b, -1)
     
+    def _get_padded_data_numel(self):
+        if not hasattr(self, 'padded_data_shape'):
+            raise ValueError(r_str("padded_data_shape not set"))
+        return self.padded_data_shape[0] * self.padded_data_shape[1]
+    
     @torch.inference_mode()
     def _get_candidate_mm_ext(self, data):
+        if not self.conversion_complete:
+            self.coeff_set = self.coeff_set.to(data.device).to(data.dtype)
+            self.conversion_complete = True
         dtype = data.dtype
         device = data.device
         if not hasattr(self, 'bin_combs'):
@@ -472,8 +481,12 @@ class sbvr_input:
         
         return self.candidate_matrix
     
+    @torch.inference_mode()
+    def _get_all_points(self, coeff):
+        return coeff @ self.bin_combs.T
+    
     def _change_coeff_sel_to_bvr(self):
-        coeff_sel_len = self.padded_data_shape.numel()
+        coeff_sel_len = self._get_padded_data_numel()
         num_bits = self._get_bvr_num_bits()
         bvr = torch.zeros((self.num_sums, (coeff_sel_len // num_bits)),
                 dtype=self.bvr_dtype, device=self.data_device)
@@ -492,7 +505,7 @@ class sbvr_input:
         return bvr
     
     def _change_bvr_to_coeff_sel(self):
-        coeff_sel_len = self.padded_data_shape.numel()
+        coeff_sel_len = self._get_padded_data_numel()
         bvr = self.bvr.permute(2, 1, 0).contiguous().view(self.num_sums, -1)
         bvr = bvr.view(self.num_sums, -1)
         num_bits = self._get_bvr_num_bits()
@@ -545,9 +558,13 @@ class sbvr_input:
         mse = diff_selected.to(torch.float32).mean(dim=-1) # mse.shape: (-1, n_ss_row)
         
         min_indices = mse.argmin(dim=-1) # min_indices.shape: (-1,)
-        coeff_comb_sel = coeff_comb_indices[:, min_indices, :] # coeff_comb_sel.shape: (-1, bvr_len)
+        
+        group_indices = torch.arange(coeff_comb_indices.shape[0], device=self.data_device)
+        
+        coeff_comb_sel = coeff_comb_indices[group_indices, min_indices, :] # coeff_comb_sel.shape: (-1, bvr_len), use advanced indexing
         coeff_comb_sel = coeff_comb_sel.flatten()
-        min_mse = mse[min_indices] # min_mse.shape: (-1,)
+        
+        # min_mse = mse[group_indices, min_indices] # min_mse.shape: (-1,)
         
         self.coeff_sel = coeff_comb_sel.to(torch.int32).to(self.data_device)
         self.coeff_idx = min_indices.to(self.data_device)
@@ -559,7 +576,7 @@ class sbvr_input:
         
         # change the results to sbvr format
         bvr = self._change_coeff_sel_to_bvr()
-        bvr = bvr.view(self.num_sums, -1, self._get_padded_data_shape()[-1] // \
+        bvr = bvr.view(self.num_sums, -1, self.padded_data_shape[-1] // \
                                                 self._get_bvr_num_bits())
         bvr = bvr.permute(2, 1, 0).contiguous()
         self.bvr = bvr
@@ -585,7 +602,7 @@ class sbvr_input:
                 min(group_start + self.bvr_len, decoded_tensor.numel())
             group_coeff = self.coeff_set[coeff_idx[i].item()]
             group_coeff_sel = coeff_sel[group_start:group_end]
-            group_all_points = self._get_candidate_mm_ext(group_coeff)
+            group_all_points = self._get_all_points(group_coeff)
             group_data = group_all_points[group_coeff_sel]
             decoded_tensor.flatten()[group_start:group_end] = group_data
             
