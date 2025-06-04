@@ -6,7 +6,8 @@ import numpy as np
 from scipy.stats import norm
 from utils.utils import cleanup_memory, set_seed
 import sbvr
-from sbvr.utils import print_errors, get_errors, r_str, y_str
+from sbvr.utils import print_errors, get_errors, r_str, y_str, b_str, g_str
+import torch.multiprocessing as mp
 
 class input_profiler:
     def __init__(self, model_name, w_bits, a_bits, kv_bits,
@@ -118,7 +119,7 @@ class input_profiler:
                 verbose_level=1
             )
             input_dist = input_dist_samples[i]
-            coeff = quantizer._batched_encode(input_dist)
+            coeff = quantizer._batched_input_encode(input_dist)
             coeff_set.append(coeff)
         
         coeff_set_info = {
@@ -134,6 +135,81 @@ class input_profiler:
         
         return coeff_set_info
     
+    def get_per_state_encoding(self, coeff_set_size: int = 4, 
+                                     num_sums: int = 8,
+                                     bvr_len: int = 128,
+                                     n_samples: int = 64,
+                                     save_coeff_set: bool = False):
+        if save_coeff_set:
+            coeff_set_save_path = os.path.join(self.save_path, f"per_state_encoding")
+            os.makedirs(coeff_set_save_path, exist_ok=True)
+            
+        mp.set_start_method('spawn', force=True)
+        n_gpus = torch.cuda.device_count()
+        print(f"Number of GPUs: {n_gpus}")
+        
+        if n_gpus == 0:
+            raise ValueError("No GPUs found")
+        
+        curr_device = 0
+        proc_list = [None for _ in range(n_gpus)]
+        
+        for layer_idx, layer_path in enumerate(self.input_file_paths):
+            if proc_list[curr_device] is not None:
+                proc_list[curr_device].join()
+            if curr_device + 1 < n_gpus and proc_list[curr_device + 1] is not None:
+                proc_list[curr_device + 1].join()
+                
+            proc_list[curr_device] = mp.Process(
+                target=self.process_single_layer_input_encoding,
+                args=(layer_idx, layer_path, curr_device, coeff_set_size, num_sums, bvr_len, n_samples, save_coeff_set, coeff_set_save_path)
+            )
+            proc_list[curr_device].start()
+            curr_device = (curr_device + 1) % n_gpus
+            
+        for p in proc_list:
+            p.join()
+            
+        print(b_str("per state input encoding complete\n"))
+
+    @torch.inference_mode()
+    def process_single_layer_input_encoding(self, layer_idx, layer_path, curr_device, coeff_set_size, 
+                                            num_sums, bvr_len, n_samples, save_coeff_set, coeff_set_save_path):
+        input_info = torch.load(layer_path)
+        for type in ["k_proj", "o_proj", "gate_proj", "down_proj", "v_proj"]:
+            print("getting per-state encoding for " + r_str(f"{layer_idx} {type}..."))
+            
+            coeff_set = []
+            io_type = "input" if type in ["k_proj", "o_proj", "gate_proj", "down_proj"] else "output"
+            input_info[io_type][type] = input_info[io_type][type].reshape(-1, bvr_len)
+            print(b_str("finished loading target data, starting encoding..."))
+            
+            for _ in range(coeff_set_size):
+                sample_indices = torch.randint(0, input_info[io_type][type].shape[0], (n_samples,))
+                target_input = input_info[io_type][type][sample_indices].to(curr_device)
+                quantizer = sbvr.sbvr(
+                    encoder_config={
+                        "num_sums": num_sums,
+                        "bvr_len": bvr_len
+                    },
+                    verbose_level=1
+                )
+                coeff = quantizer._batched_input_encode(target_input)
+                coeff_set.append(coeff)
+            cleanup_memory()
+            
+            coeff_set_info = {
+                "num_sums": num_sums,
+                "bvr_len": bvr_len,
+                "device": curr_device,
+                "coeff_set": torch.stack(coeff_set, dim=0).to(quantizer.compute_dtype).to(curr_device)
+            }
+            print(b_str("finished encoding, saving coeff set...\n"))
+            
+            if save_coeff_set:
+                torch.save(coeff_set_info, os.path.join(coeff_set_save_path, f"{layer_idx}_{type}.pt"))
+            cleanup_memory()
+                
     def encode_input_from_coeff_set(self, input: torch.Tensor, 
                                     coeff_set_info: dict = {}, 
                                     coeff_set_path: str = None,
@@ -175,18 +251,22 @@ class input_profiler:
                             coeff_set_info={}, 
                             coeff_set_path=None,
                             save_profile_results=False,
-                            enable_oneshot_encoding=False):
+                            enable_oneshot_encoding=False,
+                            per_state_encoding=False):
         input_types = ["k_proj", "o_proj", "gate_proj", "down_proj", "v_proj"]
         profile_results = {}
         for layer_idx, layer_path in enumerate(self.input_file_paths):
             input_info = torch.load(layer_path)
             for type in input_types:
                 print(f"testing layer {layer_idx} {type}...")
-                io_name_flag = "input" if type in ["k_proj", "o_proj", "gate_proj", "down_proj"] else "output"
+                io_type = "input" if type in ["k_proj", "o_proj", "gate_proj", "down_proj"] else "output"
                 
-                input_info[io_name_flag][type] = input_info[io_name_flag][type].reshape(-1, input_info[io_name_flag][type].shape[-1])
-                sample_indices = torch.randint(0, input_info[io_name_flag][type].shape[0], (n_samples_per_input_type,))
-                target_input = input_info[io_name_flag][type][sample_indices]
+                input_info[io_type][type] = input_info[io_type][type].reshape(-1, input_info[io_type][type].shape[-1])
+                sample_indices = torch.randint(0, input_info[io_type][type].shape[0], (n_samples_per_input_type,))
+                target_input = input_info[io_type][type][sample_indices]
+                
+                if per_state_encoding:
+                    coeff_set_path = os.path.join(self.save_path, f"per_state_encoding", f"{layer_idx}_{type}.pt")
                 
                 error, mse, max_error, min_error, std_dev = self.encode_input_from_coeff_set(target_input, coeff_set_info, coeff_set_path, 
                                                                                              enable_oneshot_encoding=enable_oneshot_encoding)
@@ -205,7 +285,10 @@ class input_profiler:
                     y_str("Std. Dev.: ") + f"{std_dev:.4e}\n")
                 
         if save_profile_results:
-            torch.save(profile_results, os.path.join(self.save_path, f"profile_results.pt"))
+            if per_state_encoding:
+                torch.save(profile_results, os.path.join(self.save_path, f"per_state_profile_results.pt"))
+            else:
+                torch.save(profile_results, os.path.join(self.save_path, f"profile_results.pt"))
             
         return profile_results
     
@@ -237,8 +320,8 @@ if __name__ == "__main__":
     # print(profile_results)
     # profile_results_path = os.path.join(profiler.save_path, f"profile_results.pt")
     # profiler.printout_profile_results(profile_results_path=profile_results_path)
-    profiler_results = profiler.test_sbvr_to_inputs(coeff_set_path=os.path.join(profiler.save_path, f"input_coeff_set_info.pt"), save_profile_results=False, 
-                                                    enable_oneshot_encoding=True)
-    
-        
+    # profiler_results = profiler.test_sbvr_to_inputs(coeff_set_path=os.path.join(profiler.save_path, f"input_coeff_set_info.pt"), save_profile_results=False, 
+    #                                                 enable_oneshot_encoding=True)
+    # profiler.get_per_state_encoding(coeff_set_size=4, num_sums=8, bvr_len=128, n_samples=128, save_coeff_set=True)
+    profiler_results = profiler.test_sbvr_to_inputs(save_profile_results=True, enable_oneshot_encoding=True, per_state_encoding=True)
         
