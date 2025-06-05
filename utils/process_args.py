@@ -276,6 +276,14 @@ def parser_gen():
     parser.add_argument(
         "--layer_idx", type=int, default=10, help="Which decoder layer to capture"
     )
+    
+    # Flash Attention Arguments
+    parser.add_argument(
+        "--flash_attn",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use Flash Attention for the model",
+    )
 
     args, unknown = parser.parse_known_args()
 

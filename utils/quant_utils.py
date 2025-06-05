@@ -222,6 +222,17 @@ class ActQuantWrapper(torch.nn.Module):
         self.online_partial_had = False
         self.had_dim = 0
         self.fp32_had = False
+        
+        # for sbvr wrapping
+        self.e2e_sbvr_applied = False
+        
+        # ['naive', 'accelerate']
+        # if 'naive', weight tensor and inputs will be decoded offline
+        # if 'accelerate', sbvr info (bvr, coeff_set, coeff_idx) will be stored in the wrapper, and inputs will be decoded on the fly
+        self.sbvr_forward_mode = 'naive'
+        
+        self.sbvrize_input_on_foward = False # only set 'True' when this wrapper wraps 'down_proj'
+        self.input_quantizer = None
 
     def extra_repr(self) -> str:
         str_ = f"Input Quantizer Bits: {self.quantizer.bits}"
@@ -287,7 +298,16 @@ class ActQuantWrapper(torch.nn.Module):
         if R1 is not None:
             x = self.module(x, R1, R2, transpose).to(x_dtype)
         else:
-            x = self.module(x).to(x_dtype)
+            if self.e2e_sbvr_applied:
+                if self.sbvr_forward_mode == 'naive':
+                    if self.sbvrize_input_on_forward:
+                        bvr, coeff_idx = self.input_quantizer.oneshot_input_encode(x)
+                        x = self.input_quantizer.decode()
+                    x = self.module(x).to(x_dtype)
+                else:
+                    raise NotImplementedError("accelerate mode for sbvr wrapping is not implemented yet!")
+            else:
+                x = self.module(x).to(x_dtype)
 
         if self.out_quantizer.bits < 16:  # Quantize the output, if needed
             self.out_quantizer.find_params(x)

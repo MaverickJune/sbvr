@@ -8,6 +8,8 @@ from utils.utils import cleanup_memory, set_seed
 import sbvr
 from sbvr.utils import print_errors, get_errors, r_str, y_str, b_str, g_str
 import torch.multiprocessing as mp
+from utils import hadamard_utils
+from tqdm import tqdm
 
 class input_profiler:
     def __init__(self, model_name, w_bits, a_bits, kv_bits,
@@ -139,7 +141,8 @@ class input_profiler:
                                      num_sums: int = 8,
                                      bvr_len: int = 128,
                                      n_samples: int = 64,
-                                     save_coeff_set: bool = False):
+                                     save_coeff_set: bool = False,
+                                     down_proj_only: bool = False):
         if save_coeff_set:
             coeff_set_save_path = os.path.join(self.save_path, f"per_state_encoding")
             os.makedirs(coeff_set_save_path, exist_ok=True)
@@ -162,7 +165,8 @@ class input_profiler:
                 
             proc_list[curr_device] = mp.Process(
                 target=self.process_single_layer_input_encoding,
-                args=(layer_idx, layer_path, curr_device, coeff_set_size, num_sums, bvr_len, n_samples, save_coeff_set, coeff_set_save_path)
+                args=(layer_idx, layer_path, curr_device, coeff_set_size, num_sums, bvr_len, n_samples, save_coeff_set, coeff_set_save_path,
+                      down_proj_only)
             )
             proc_list[curr_device].start()
             curr_device = (curr_device + 1) % n_gpus
@@ -174,9 +178,10 @@ class input_profiler:
 
     @torch.inference_mode()
     def process_single_layer_input_encoding(self, layer_idx, layer_path, curr_device, coeff_set_size, 
-                                            num_sums, bvr_len, n_samples, save_coeff_set, coeff_set_save_path):
+                                            num_sums, bvr_len, n_samples, save_coeff_set, coeff_set_save_path, down_proj_only):
         input_info = torch.load(layer_path)
-        for type in ["k_proj", "o_proj", "gate_proj", "down_proj", "v_proj"]:
+        target_types = ["down_proj"] if down_proj_only else ["k_proj", "o_proj", "gate_proj", "down_proj", "v_proj"]
+        for type in target_types:
             print("getting per-state encoding for " + r_str(f"{layer_idx} {type}..."))
             
             coeff_set = []
@@ -306,7 +311,21 @@ class input_profiler:
                 y_str("Max: ") + f"{profile_results[key]['max_error']:.4e}" + ", " +
                 y_str("Min: ") + f"{profile_results[key]['min_error']:.4e}" + ", " +
                 y_str("Std. Dev.: ") + f"{profile_results[key]['std_dev']:.4e}")
-    
+            
+    def apply_had_rot_to_down_proj(self):
+        '''
+        apply R4 rotation to down_proj for correct sbvr encoding
+        '''
+        for layer_path in tqdm(self.input_file_paths, desc="applying R4 rotation to down_proj", ncols=80):
+            input_info = torch.load(layer_path)
+            down_proj = input_info["input"]["down_proj"].to("cpu")
+            for i in range(down_proj.shape[0]):
+                target_tensor = down_proj[i].to("cuda:0")
+                had_K, K = hadamard_utils.get_hadK(target_tensor.shape[-1])
+                target_tensor = hadamard_utils.matmul_hadU_cuda(target_tensor, had_K, K)
+                input_info["input"]["down_proj"][i] = target_tensor.to("cpu")
+            cleanup_memory()
+            torch.save(input_info, layer_path)
     
 if __name__ == "__main__":
     profiler = input_profiler("meta-llama/Llama-3.2-1B", 4, 16, 16)
@@ -323,5 +342,8 @@ if __name__ == "__main__":
     # profiler_results = profiler.test_sbvr_to_inputs(coeff_set_path=os.path.join(profiler.save_path, f"input_coeff_set_info.pt"), save_profile_results=False, 
     #                                                 enable_oneshot_encoding=True)
     # profiler.get_per_state_encoding(coeff_set_size=4, num_sums=8, bvr_len=128, n_samples=128, save_coeff_set=True)
+    # profiler_results = profiler.test_sbvr_to_inputs(n_samples_per_input_type=1, save_profile_results=False, enable_oneshot_encoding=True, per_state_encoding=True)
+    
+    # profiler.apply_had_rot_to_down_proj()
+    profiler.get_per_state_encoding(coeff_set_size=4, num_sums=8, bvr_len=128, n_samples=128, save_coeff_set=True, down_proj_only=True)
     profiler_results = profiler.test_sbvr_to_inputs(save_profile_results=True, enable_oneshot_encoding=True, per_state_encoding=True)
-        

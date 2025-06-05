@@ -41,6 +41,9 @@ def train() -> None:
         config.tie_word_embeddings = False
         process_word_embeddings = True
     dtype = torch.bfloat16 if training_args.bf16 else torch.float16
+    
+    if ptq_args.flash_attn:
+        config._attn_implementation = "flash_attention_2"
     model = LlamaForCausalLM.from_pretrained(
         pretrained_model_name_or_path=model_args.input_model,
         config=config,

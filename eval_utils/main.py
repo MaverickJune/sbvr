@@ -10,6 +10,7 @@
 
 import torch
 import transformers
+import sys
 
 from eval_utils import gptq_utils, rotation_utils
 from utils import data_utils, fuse_norm_utils, hadamard_utils, quant_utils, utils
@@ -157,5 +158,15 @@ def ptq_model(args, model, model_args=None):
                     config=model.config,
                     **k_quant_config,
                 )
+    
+    # # debugging section
+    local_rank = utils.get_local_rank()
+    if local_rank == 0:
+        print(model)
+        for i,layer in enumerate(model.model.layers):
+            print(f"layer {i}")
+            print(layer.mlp.down_proj.online_full_had)
+            print(layer.mlp.down_proj.online_partial_had)
+    sys.exit(0)
 
     return model
