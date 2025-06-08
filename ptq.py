@@ -12,7 +12,7 @@ import torch
 import torch.distributed as dist
 from transformers import LlamaTokenizerFast
 import transformers
-from eval_utils.main import ptq_model
+from eval_utils.main import ptq_model, sbvrize_model
 from eval_utils.modeling_llama import LlamaForCausalLM
 from utils import data_utils, eval_utils, utils
 from utils.process_args import process_args_ptq
@@ -54,6 +54,13 @@ def train() -> None:
         model.lm_head.weight.data = model.model.embed_tokens.weight.data.clone()
     model.cuda()
     model = ptq_model(ptq_args, model, model_args)
+    
+    if ptq_args.sbvrize_input:
+        if local_rank == 0:
+            log.info("Start to sbvrize the model...")
+        model = sbvrize_model(model, ptq_args, model_args, forward_mode='naive')
+        if local_rank == 0:
+            log.info("SBVR wrapping completed!")
     
     model.seqlen = training_args.model_max_length
     if local_rank == 0:

@@ -4,9 +4,10 @@ import math
 import numpy as np
 from tqdm import tqdm
 from .encoder import sbvr_encoder
-from .utils import g_str, y_str, b_str, r_str, sbvr_serialized
+from .utils import g_str, y_str, b_str, r_str, sbvr_serialized, cleanup_memory
 from sbvr.sbvr_cuda import _sbvr_mm_T
-
+import os
+import sys
         
 class sbvr(torch.nn.Module):
     def __init__(self, 
@@ -529,13 +530,13 @@ class sbvr_input:
         return coeff_sel[:coeff_sel_len]
         
     @torch.inference_mode()
-    def oneshot_input_encode(self, data):
+    def oneshot_input_encode(self, data, use_oom_avoidance=False):
         """
         perform the oneshot encoding without iterating the for loop
         """
         # pad the input and reshape the data
         if data.dim() != 2:
-            raise ValueError(r_str("Input data must be a 2D tensor"))
+            data = data.reshape(-1, data.shape[-1])
         self.data_device = data.device
         self.original_dtype = data.dtype
         self.original_data_shape = data.shape
@@ -546,6 +547,7 @@ class sbvr_input:
         if padded_data_diff > 0:
             data = torch.cat([data, torch.zeros(data.shape[0], padded_data_diff, device=data.device, dtype=data.dtype)], dim=1)
         data = data.view(-1, 1, self.bvr_len, 1)
+        groups = data.shape[0]
         
         # perform coeff searching
         candidate_matrix = self._get_candidate_mm_ext(data)
@@ -553,18 +555,46 @@ class sbvr_input:
         n_ss_col = candidate_matrix.shape[1]
         candidate_matrix = candidate_matrix.view(1, n_ss_row, 1, n_ss_col)
         
-        diff = (data - candidate_matrix)**2 # diff.shape: (-1, n_ss_row, bvr_len, n_ss_col)
-        diff_selected, coeff_comb_indices = diff.min(dim=-1) # diff_selected.shape: (-1, n_ss_row, bvr_len), coeff_comb_indices.shape: (-1, n_ss_row, bvr_len)
-        mse = diff_selected.to(torch.float32).mean(dim=-1) # mse.shape: (-1, n_ss_row)
+        if self.data_device.type == "cuda":
+            elem_size = torch.tensor([], dtype=self.original_dtype).element_size()
+            diff_mat_size = (self.bvr_len * n_ss_row * n_ss_col * elem_size)
+            free_mem = torch.cuda.mem_get_info(self.data_device)[0]
+            diff_batch_size = max(1, int(free_mem * 0.1 // diff_mat_size))
+            # print(b_str(f"diff_batch_size: {diff_batch_size}"))
+            # sys.exit(0)
+        else:
+            raise ValueError(r_str("Only CUDA is supported for now"))
         
-        min_indices = mse.argmin(dim=-1) # min_indices.shape: (-1,)
-        
-        group_indices = torch.arange(coeff_comb_indices.shape[0], device=self.data_device)
-        
-        coeff_comb_sel = coeff_comb_indices[group_indices, min_indices, :] # coeff_comb_sel.shape: (-1, bvr_len), use advanced indexing
-        coeff_comb_sel = coeff_comb_sel.flatten()
-        
-        # min_mse = mse[group_indices, min_indices] # min_mse.shape: (-1,)
+        if not use_oom_avoidance:
+            diff = (data - candidate_matrix)**2 # diff.shape: (-1, n_ss_row, bvr_len, n_ss_col)
+            diff_selected, coeff_comb_indices = diff.min(dim=-1) # diff_selected.shape: (-1, n_ss_row, bvr_len), coeff_comb_indices.shape: (-1, n_ss_row, bvr_len)
+            mse = diff_selected.to(torch.float32).mean(dim=-1) # mse.shape: (-1, n_ss_row)
+            
+            min_indices = mse.argmin(dim=-1) # min_indices.shape: (-1,)
+            
+            group_indices = torch.arange(coeff_comb_indices.shape[0], device=self.data_device)
+            
+            coeff_comb_sel = coeff_comb_indices[group_indices, min_indices, :] # coeff_comb_sel.shape: (-1, bvr_len), use advanced indexing
+            coeff_comb_sel = coeff_comb_sel.flatten()
+        else:
+            bs = min(diff_batch_size, groups)
+            coeff_sel_chunks, coeff_idx_chunks = [], []
+            for start in range(0, groups, bs):
+                end = min(start + bs, groups)
+                chunk = data[start:end]
+                
+                diff = (chunk - candidate_matrix)**2
+                diff_selected, coeff_comb_indices = diff.min(dim=-1)
+                mse = diff_selected.to(torch.float32).mean(dim=-1)
+                
+                min_indices = mse.argmin(dim=-1)
+                group_indices = torch.arange(coeff_comb_indices.shape[0], device=self.data_device)
+                coeff_comb_sel = coeff_comb_indices[group_indices, min_indices, :]
+                
+                coeff_sel_chunks.append(coeff_comb_sel)
+                coeff_idx_chunks.append(min_indices)
+            coeff_comb_sel = torch.cat(coeff_sel_chunks, dim=0).flatten()
+            min_indices = torch.cat(coeff_idx_chunks, dim=0)
         
         self.coeff_sel = coeff_comb_sel.to(torch.int32).to(self.data_device)
         self.coeff_idx = min_indices.to(self.data_device)
@@ -613,3 +643,19 @@ class sbvr_input:
             decoded_tensor = decoded_tensor[slices]
         
         return decoded_tensor
+    
+    def clean_encode_info(self, release_memory=False):
+        self.coeff_sel = None
+        self.coeff_idx = None
+        self.bvr = None
+        
+        self.conversion_complete = False
+        
+        self.data_device = None
+        self.original_dtype = None
+        self.original_data_shape = None
+        self.padded_data_shape = None
+        
+        if release_memory:
+            cleanup_memory()
+        

@@ -44,6 +44,5 @@ torchrun --nnodes=1 --nproc_per_node=$5 ptq.py \
 --rotate \
 --rotate_mode "hadamard" \
 --load_qmodel_path "$path" \
---save_path "$input_profile_path" \
---capture_layer_io \
-# --flash_attn
+--sbvrize_input
+

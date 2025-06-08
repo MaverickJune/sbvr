@@ -40,6 +40,7 @@ torchrun --nnodes=1 --nproc_per_node=$5 ptq.py \
 --gptq_blockwise \
 --rotate \
 --rotate_mode "hadamard" \
---save_qmodel_path "$path" \
+--load_qmodel_path "$path"
+# --save_qmodel_path "$path" \
 # --optimized_rotation_path "3B_R.bin" \
 

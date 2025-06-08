@@ -325,6 +325,7 @@ class LlamaMLP(nn.Module):
 
     def forward(self, x):
         if self.config.pretraining_tp > 1:
+            raise NotImplementedError("Slicing is not supported for sbvr injection")
             slice = self.intermediate_size // self.config.pretraining_tp
             gate_proj_slices = self.gate_proj.weight.split(slice, dim=0)
             up_proj_slices = self.up_proj.weight.split(slice, dim=0)
@@ -352,6 +353,10 @@ class LlamaMLP(nn.Module):
             ]
             down_proj = sum(down_proj)
         else:
+            # ---- sbvr injection ----
+            if getattr(self, "sbvr_input_wrapper", None) is not None:
+                x = self.sbvr_input_wrapper(x, signiture="mlp_upgate")
+            # ------------------------
             down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
         return down_proj
@@ -432,6 +437,7 @@ class LlamaAttention(nn.Module):
         bsz, q_len, _ = hidden_states.size()
 
         if self.config.pretraining_tp > 1:
+            raise NotImplementedError("Slicing is not supported for sbvr injection")
             key_value_slicing = (
                 self.num_key_value_heads * self.head_dim
             ) // self.config.pretraining_tp
@@ -460,6 +466,10 @@ class LlamaAttention(nn.Module):
             value_states = torch.cat(value_states, dim=-1)
 
         else:
+            # ---- sbvr injection ----
+            if getattr(self, "sbvr_input_wrapper", None) is not None:
+                hidden_states = self.sbvr_input_wrapper(hidden_states, signiture="qkv_proj")
+            # ------------------------
             query_states = self.q_proj(hidden_states)
             key_states = self.k_proj(hidden_states)
             value_states = self.v_proj(hidden_states)
@@ -525,6 +535,7 @@ class LlamaAttention(nn.Module):
         attn_output = attn_output.reshape(bsz, q_len, -1)
 
         if self.config.pretraining_tp > 1:
+            raise NotImplementedError("Slicing is not supported for sbvr injection")
             attn_output = attn_output.split(
                 self.hidden_size // self.config.pretraining_tp, dim=2
             )
@@ -538,6 +549,10 @@ class LlamaAttention(nn.Module):
                 ]
             )
         else:
+            # ---- sbvr injection ----
+            if getattr(self, "sbvr_input_wrapper", None) is not None:
+                attn_output = self.sbvr_input_wrapper(attn_output, signiture="o_proj")
+            # ------------------------
             attn_output = self.o_proj(attn_output)
 
         if not output_attentions:
@@ -583,6 +598,11 @@ class LlamaFlashAttention2(LlamaAttention):
         output_attentions = False
 
         bsz, q_len, _ = hidden_states.size()
+        
+        # ---- sbvr injection ----
+        if getattr(self, "sbvr_input_wrapper", None) is not None:
+            hidden_states = self.sbvr_input_wrapper(hidden_states, signiture="qkv_proj")
+        # ------------------------
 
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
@@ -670,6 +690,12 @@ class LlamaFlashAttention2(LlamaAttention):
         )
 
         attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
+        
+        # ---- sbvr injection ----
+        if getattr(self, "sbvr_input_wrapper", None) is not None:
+            attn_output = self.sbvr_input_wrapper(attn_output, signiture="o_proj")
+        # ------------------------
+        
         attn_output = self.o_proj(attn_output)
 
         if not output_attentions:
@@ -718,6 +744,11 @@ class LlamaSdpaAttention(LlamaAttention):
             )
 
         bsz, q_len, _ = hidden_states.size()
+
+        # ---- sbvr injection ----
+        if getattr(self, "sbvr_input_wrapper", None) is not None:
+            hidden_states = self.sbvr_input_wrapper(hidden_states, signiture="qkv_proj")
+        # ------------------------
 
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
@@ -783,6 +814,11 @@ class LlamaSdpaAttention(LlamaAttention):
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, q_len, -1)
+        
+        # ---- sbvr injection ----
+        if getattr(self, "sbvr_input_wrapper", None) is not None:
+            attn_output = self.sbvr_input_wrapper(attn_output, signiture="o_proj")
+        # ------------------------
 
         attn_output = self.o_proj(attn_output)
 

@@ -13,11 +13,12 @@ import transformers
 import sys
 
 from eval_utils import gptq_utils, rotation_utils
-from utils import data_utils, fuse_norm_utils, hadamard_utils, quant_utils, utils
+from utils import data_utils, fuse_norm_utils, hadamard_utils, quant_utils, utils, profile_utils
 from utils.convert_to_executorch import (
     sanitize_checkpoint_from_spinquant,
     write_model_llama,
 )
+from utils.quant_utils import ActQuantWrapper
 
 def ptq_model(args, model, model_args=None):
     transformers.set_seed(args.seed)
@@ -160,13 +161,62 @@ def ptq_model(args, model, model_args=None):
                 )
     
     # # debugging section
-    local_rank = utils.get_local_rank()
-    if local_rank == 0:
-        print(model)
-        for i,layer in enumerate(model.model.layers):
-            print(f"layer {i}")
-            print(layer.mlp.down_proj.online_full_had)
-            print(layer.mlp.down_proj.online_partial_had)
-    sys.exit(0)
+    # local_rank = utils.get_local_rank()
+    # if local_rank == 0:
+    #     print(model)
+    #     for i,layer in enumerate(model.model.layers):
+    #         print(f"layer {i}")
+    #         print(layer.mlp.down_proj.online_full_had)
+    #         print(layer.mlp.down_proj.online_partial_had)
+    # sys.exit(0)
 
+    return model
+
+@ torch.inference_mode()
+def sbvrize_model(model, ptq_args=None, model_args=None, forward_mode='naive'):
+    '''
+    WARNING: this function should be called only after the ptq_model() is called
+    '''
+    w_bits = ptq_args.w_bits
+    a_bits = ptq_args.a_bits
+    kv_bits = ptq_args.k_bits
+    model_name = model_args.input_model
+    
+    target_attn_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
+    target_mlp_modules = ["gate_proj", "up_proj","down_proj"]
+    name_convert_table = {
+        "q_proj": "qkv_proj",
+        "k_proj": "qkv_proj",
+        "v_proj": "qkv_proj",
+        "o_proj": "o_proj",
+        "gate_proj": "mlp_upgate",
+        "up_proj": "mlp_upgate",
+        "down_proj": "mlp_down"
+    }
+    
+    for idx, layer in enumerate(model.model.layers):
+        # set sbvr_input_wrapper for each module
+        device = layer.self_attn.q_proj.weight.device
+        layer.self_attn.sbvr_input_wrapper = profile_utils.sbvr_input_wrapper(idx, model_name, w_bits, a_bits, kv_bits, device)
+        layer.mlp.sbvr_input_wrapper = profile_utils.sbvr_input_wrapper(idx, model_name, w_bits, a_bits, kv_bits, device)
+        
+        # set variables in ActQuantWrapper for sbvr wrapping
+        for target_module in target_attn_modules:
+            target = getattr(layer.self_attn, target_module)
+            if not isinstance(target, ActQuantWrapper):
+                raise ValueError(f"Target module {idx}_{target_module} is not an ActQuantWrapper")
+            target.e2e_sbvr_applied = True
+            target.sbvr_forward_mode = forward_mode
+            target.input_quantizer = layer.self_attn.sbvr_input_wrapper.quantizer_dict[name_convert_table[target_module]]
+            
+        for target_module in target_mlp_modules:
+            target = getattr(layer.mlp, target_module)
+            if not isinstance(target, ActQuantWrapper):
+                raise ValueError(f"Target module {idx}_{target_module} is not an ActQuantWrapper")
+            target.e2e_sbvr_applied = True
+            target.sbvr_forward_mode = forward_mode
+            target.input_quantizer = layer.mlp.sbvr_input_wrapper.quantizer_dict[name_convert_table[target_module]]
+            if target_module == "down_proj":
+                target.sbvrize_input_on_forward = True
+    
     return model

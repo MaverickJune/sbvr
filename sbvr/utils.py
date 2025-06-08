@@ -190,4 +190,28 @@ class sbvr_serialized():
             self.bvr_dtype, self.original_dtype, self.original_data_shape, \
             bvr, coeff_idx, coeff_cache, self.input_num_sums, input_coeff
 
-        
+def cleanup_memory(verbose=True) -> None:
+    """Run GC and clear GPU memory."""
+    import gc
+    import inspect
+
+    caller_name = ""
+    try:
+        caller_name = f" (from {inspect.stack()[1].function})"
+    except (ValueError, KeyError):
+        pass
+
+    def total_reserved_mem() -> int:
+        return sum(
+            torch.cuda.memory_reserved(device=i)
+            for i in range(torch.cuda.device_count())
+        )
+
+    memory_before = total_reserved_mem()
+
+    # gc.collect and empty cache are necessary to clean up GPU memory if the model was distributed
+    gc.collect()
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        memory_after = total_reserved_mem()

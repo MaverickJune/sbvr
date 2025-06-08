@@ -231,7 +231,7 @@ class ActQuantWrapper(torch.nn.Module):
         # if 'accelerate', sbvr info (bvr, coeff_set, coeff_idx) will be stored in the wrapper, and inputs will be decoded on the fly
         self.sbvr_forward_mode = 'naive'
         
-        self.sbvrize_input_on_foward = False # only set 'True' when this wrapper wraps 'down_proj'
+        self.sbvrize_input_on_forward = False # only set 'True' when this wrapper wraps 'down_proj'
         self.input_quantizer = None
 
     def extra_repr(self) -> str:
@@ -302,7 +302,7 @@ class ActQuantWrapper(torch.nn.Module):
                 if self.sbvr_forward_mode == 'naive':
                     if self.sbvrize_input_on_forward:
                         bvr, coeff_idx = self.input_quantizer.oneshot_input_encode(x)
-                        x = self.input_quantizer.decode()
+                    x = self.input_quantizer.decode().reshape(x.shape)
                     x = self.module(x).to(x_dtype)
                 else:
                     raise NotImplementedError("accelerate mode for sbvr wrapping is not implemented yet!")

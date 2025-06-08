@@ -326,6 +326,37 @@ class input_profiler:
                 input_info["input"]["down_proj"][i] = target_tensor.to("cpu")
             cleanup_memory()
             torch.save(input_info, layer_path)
+            
+class sbvr_input_wrapper(torch.nn.Module):
+    def __init__(self, layer_idx, model_name, w_bits, a_bits, kv_bits, device):
+        super(sbvr_input_wrapper, self).__init__()
+        self.layer_idx = layer_idx
+        self.device = device
+        self.model_name = self.model_name_formatter(model_name, w_bits, a_bits, kv_bits)
+        self.input_storage_path = os.path.join(
+            os.path.dirname(
+                os.path.dirname(os.path.abspath(__file__))
+            ), f"input_profile/{self.model_name}/per_state_encoding"
+        )
+        self.qkv_proj = torch.load(os.path.join(self.input_storage_path, f"{self.layer_idx}_k_proj.pt"), map_location=self.device)
+        self.o_proj = torch.load(os.path.join(self.input_storage_path, f"{self.layer_idx}_o_proj.pt"), map_location=self.device)
+        self.mlp_upgate = torch.load(os.path.join(self.input_storage_path, f"{self.layer_idx}_gate_proj.pt"), map_location=self.device)
+        self.mlp_down = torch.load(os.path.join(self.input_storage_path, f"{self.layer_idx}_down_proj.pt"), map_location=self.device)
+        
+        self.quantizer_dict = {
+            "qkv_proj": sbvr.core.sbvr_input(self.qkv_proj["coeff_set"], self.qkv_proj["bvr_len"], self.qkv_proj["num_sums"]),
+            "o_proj": sbvr.core.sbvr_input(self.o_proj["coeff_set"], self.o_proj["bvr_len"], self.o_proj["num_sums"]),
+            "mlp_upgate": sbvr.core.sbvr_input(self.mlp_upgate["coeff_set"], self.mlp_upgate["bvr_len"], self.mlp_upgate["num_sums"]),
+            "mlp_down": sbvr.core.sbvr_input(self.mlp_down["coeff_set"], self.mlp_down["bvr_len"], self.mlp_down["num_sums"])
+        }
+        
+    def model_name_formatter(self, model_name, w_bits, a_bits, kv_bits):
+        model_name = model_name.replace("/", "_")
+        return f"{model_name}_{w_bits}_{a_bits}_{kv_bits}"
+    
+    def forward(self, x, signiture=None):
+        bvr, coeff_idx = self.quantizer_dict[signiture].oneshot_input_encode(x)
+        return x
     
 if __name__ == "__main__":
     profiler = input_profiler("meta-llama/Llama-3.2-1B", 4, 16, 16)

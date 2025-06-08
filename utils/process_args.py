@@ -66,6 +66,13 @@ def parser_gen():
     )
     
     parser.add_argument(
+        "--sbvrize_input",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use SBVR for input quantization."
+    )
+    
+    parser.add_argument(
         "--gptq_blockwise",
         action=argparse.BooleanOptionalAction,
         default=False,
