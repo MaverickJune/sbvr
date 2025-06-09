@@ -1315,7 +1315,6 @@ class LlamaForSbvrLM(LlamaPreTrainedModel):
 
     def __init__(self, config, sbvr_state_dict=None):
         super().__init__(config)
-        self.pseudo_fuse_layer_norms()
         
         if sbvr_state_dict is None:
             raise ValueError("sbvr_state_dict must be provided")
@@ -1340,10 +1339,13 @@ class LlamaForSbvrLM(LlamaPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
+        self.pseudo_fuse_layer_norms()
         
-    def load_sbvr_weights(self, root_sbvr_path: str = None):
+    def load_sbvr_weights(self, root_sbvr_path: str = None, sbvrizer_path: str = None):
         if root_sbvr_path is None:
             raise ValueError("root_sbvr_path must be provided")
+        if sbvrizer_path is None:
+            raise ValueError("sbvrizer_path must be provided")
         
         for layer_idx, layer in enumerate(self.model.layers):
             sbvr_q_proj_path = os.path.join(root_sbvr_path, f"sbvr_layer_{layer_idx}_self_attn.q_proj.module.pt")
@@ -1355,6 +1357,11 @@ class LlamaForSbvrLM(LlamaPreTrainedModel):
             sbvr_gate_proj_path = os.path.join(root_sbvr_path, f"sbvr_layer_{layer_idx}_mlp.gate_proj.module.pt")
             sbvr_down_proj_path = os.path.join(root_sbvr_path, f"sbvr_layer_{layer_idx}_mlp.down_proj.module.pt")
             
+            sbvrizer_qkv_path = os.path.join(sbvrizer_path, f"{layer_idx}_k_proj.pt")
+            sbvrizer_o_proj_path = os.path.join(sbvrizer_path, f"{layer_idx}_o_proj.pt")
+            sbvrizer_upgate_path = os.path.join(sbvrizer_path, f"{layer_idx}_gate_proj.pt")
+            sbvrizer_down_path = os.path.join(sbvrizer_path, f"{layer_idx}_down_proj.pt")
+            
             layer.self_attn.q_proj = sbvr.load(sbvr_q_proj_path)
             layer.self_attn.k_proj = sbvr.load(sbvr_k_proj_path)
             layer.self_attn.v_proj = sbvr.load(sbvr_v_proj_path)
@@ -1363,6 +1370,12 @@ class LlamaForSbvrLM(LlamaPreTrainedModel):
             layer.mlp.up_proj = sbvr.load(sbvr_up_proj_path)
             layer.mlp.gate_proj = sbvr.load(sbvr_gate_proj_path)
             layer.mlp.down_proj = sbvr.load(sbvr_down_proj_path)
+            
+            layer.self_attn.qkv_sbvrizer.load_coeff_set(torch.load(sbvrizer_qkv_path)["coeff_set"])
+            layer.self_attn.o_sbvrizer.load_coeff_set(torch.load(sbvrizer_o_proj_path)["coeff_set"])
+            layer.mlp.upgate_sbvrizer.load_coeff_set(torch.load(sbvrizer_upgate_path)["coeff_set"])
+            layer.mlp.down_sbvrizer.load_coeff_set(torch.load(sbvrizer_down_path)["coeff_set"])
+            
         print(f"Loaded SBVR weights from {root_sbvr_path}")
 
     def get_input_embeddings(self):

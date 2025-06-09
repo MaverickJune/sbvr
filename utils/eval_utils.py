@@ -10,17 +10,75 @@
 
 import logging
 import os
+import sys
 
 import torch
 from tqdm import tqdm
 
 from utils import model_utils
-
+from transformers.cache_utils import DynamicCache
 
 @torch.no_grad()
-def evaluator(model, testenc, dev, args):
+def evaluator(model, testenc, dev, args, decode_only=False, decode_len=-1):
+    if decode_only: 
+        # no batching
+        # originated and modified from https://github.com/mit-han-lab/llm-awq/blob/main/awq/entry.py
+        print("Measuring the ppl only at the decoding stage")
+        
+        if decode_len == -1:
+            raise ValueError("decode_len must be provided")
+        
+        model.eval()
+        model = model.to(dev)
+        use_cache = model.config.use_cache
+        model.config.use_cache = True
+        
+        # prepare the dataset
+        input_ids = testenc.input_ids
+        nsamples = input_ids.numel() // model.seqlen
+        input_ids = input_ids[:, :nsamples * model.seqlen].view(1, -1).to(dev)
+        prefill_len = model.seqlen - decode_len
+        nlls = []
+        for i in tqdm(range(nsamples), desc="evaluating decode only ppl"):
+            batch = input_ids[:, (i * model.seqlen) : ((i + 1) * model.seqlen)]
+            kv_cache = DynamicCache()
+            
+            # perform prefill
+            with torch.no_grad():
+                # print(f"shape: {batch[:, :prefill_len].shape}")
+                # sys.exit(0)
+                output = model(batch[:, :prefill_len], past_key_values=kv_cache)
+                lm_logits = output.logits
+                kv_cache = output.past_key_values
+            
+                sample_nlls = []
+                for i in range(decode_len - 1):
+                    next_token = batch[:, prefill_len + i].unsqueeze(0)
+                    label = batch[:, prefill_len + i + 1].unsqueeze(0)
+                    loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+                    
+                    output = model(next_token, past_key_values=kv_cache)
+                    token_logits = output.logits
+                    kv_cache = output.past_key_values
+                    loss = loss_fct(
+                        token_logits.view(-1, token_logits.size(-1)),
+                        label.view(-1)
+                    )
+                    neg_log_likelihood = loss.float()
+                    
+                    # print(f"ppl: {neg_log_likelihood.item()}")
+                    # sys.exit(0)
+                    
+                    sample_nlls.append(neg_log_likelihood)
+                nlls.append(torch.cat(sample_nlls))
+                
+        ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * (decode_len - 1)))
+        model.config.use_cache = use_cache
+        logging.info(f"\n WikiText2 PPL: {ppl.item():.3f}")
+        
+        return ppl.item()
+    
     model.eval()
-
     use_cache = model.config.use_cache
     model.config.use_cache = False
 
