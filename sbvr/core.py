@@ -412,6 +412,11 @@ class sbvr(torch.nn.Module):
             
         return info_str
     
+    @torch.inference_mode()
+    def forward(self, x):
+        restored_w = self.decode()
+        return x @ restored_w.T
+    
 def mm_T(lhs, rhs, bias):
     lhs_bvr = lhs.bvr
     lhs_coeff_idx = lhs.coeff_idx
@@ -423,6 +428,14 @@ def mm_T(lhs, rhs, bias):
         bias = lhs._get_dummy_bias()
     return _sbvr_mm_T(lhs_bvr, lhs_coeff_idx, lhs_coeff_cache,
                 rhs_bvr, rhs_coeff_idx, rhs_coeff_cache, bias)
+    
+def input_sbvr_mm_T(input_bvr, input_coeff_idx, input_coeff_set,
+                    w_sbvr,
+                    bias=None):
+    if bias is None:
+        bias = w_sbvr._get_dummy_bias()
+    return _sbvr_mm_T(input_bvr, input_coeff_idx, input_coeff_set,
+                w_sbvr.bvr, w_sbvr.coeff_idx, w_sbvr.coeff_cache, bias)
     
 def load(filename, device=None, verbose_level=1) -> sbvr:
     serialized_sbvr = torch.load(filename)
@@ -658,4 +671,213 @@ class sbvr_input:
         
         if release_memory:
             cleanup_memory()
+
+class sbvrizer(torch.nn.Module):
+    def __init__(self, bvr_len, num_sums, set_size=4):
+        super(sbvrizer, self).__init__()
+        self.bvr_len = bvr_len
+        self.bvr_dtype = torch.uint32
+        self.num_sums = num_sums
+        self.set_size = set_size
         
+        self.coeff_set = torch.nn.Parameter(torch.zeros((set_size, num_sums), dtype=torch.bfloat16), requires_grad=False)
+        
+    def load_coeff_set(self, coeff_set):
+        coeff_set = coeff_set.to(self.coeff_set.device).to(self.coeff_set.dtype)
+        with torch.no_grad():
+            self.coeff_set.copy_(coeff_set)
+    
+    def _get_bvr_num_bits(self):
+        if not hasattr(self, 'bvr_num_bits'):
+            self.bvr_num_bits = \
+                torch.tensor(0, dtype=self.bvr_dtype).element_size() * 8
+        return self.bvr_num_bits
+    
+    def _dec2bin(self, x, bits):
+        # mask = 2 ** torch.arange(bits).to(x.device, x.dtype)
+        mask = 2 ** torch.arange(bits - 1, -1, -1).to(x.device, x.dtype)
+        return x.unsqueeze(-1).bitwise_and(mask).ne(0).float()
+    
+    def _bin2dec(self, b, bits):
+        mask = 2 ** torch.arange(bits - 1, -1, -1).to(b.device, b.dtype)
+        return torch.sum(mask * b, -1)
+    
+    def _get_padded_data_numel(self):
+        if not hasattr(self, 'padded_data_shape'):
+            raise ValueError(r_str("padded_data_shape not set"))
+        return self.padded_data_shape[0] * self.padded_data_shape[1]
+    
+    @torch.inference_mode()
+    def _get_candidate_mm_ext(self):
+        device = self.coeff_set.device
+        dtype = self.coeff_set.dtype
+        if not hasattr(self, 'bin_combs'):
+            self.bin_combs = torch.tensor(
+                list(itertools.product([0, 1], repeat=self.num_sums)),
+                dtype=dtype, device=device
+            )
+        if not hasattr(self, 'candidate_matrix'):
+            self.candidate_matrix = self.coeff_set @ self.bin_combs.T
+    
+    @torch.inference_mode()
+    def _get_all_points(self, coeff):
+        return coeff @ self.bin_combs.T
+    
+    def _change_coeff_sel_to_bvr(self):
+        coeff_sel_len = self._get_padded_data_numel()
+        num_bits = self._get_bvr_num_bits()
+        bvr = torch.zeros((self.num_sums, (coeff_sel_len // num_bits)),
+                dtype=self.bvr_dtype, device=self.data_device)
+        powers = 2 ** torch.arange(num_bits, dtype=torch.int64, 
+                                   device=self.data_device)
+        iter_size = 65536
+        for i in range(0, coeff_sel_len, iter_size):
+            max_i = min(i + iter_size, coeff_sel_len)
+            coeff_sel_i = self.coeff_sel[i:max_i]
+            bin_vec = self._dec2bin(coeff_sel_i, self.num_sums).to(torch.int64)
+            bin_vec = \
+                bin_vec.transpose(0, 1).reshape(self.num_sums, -1, num_bits)
+            bvr_i = torch.sum(bin_vec * powers.unsqueeze(0), dim=2)
+            bvr[:, i//32:max_i//32] = bvr_i
+        del self.coeff_sel
+        return bvr
+    
+    def _change_bvr_to_coeff_sel(self):
+        coeff_sel_len = self._get_padded_data_numel()
+        bvr = self.bvr.permute(2, 1, 0).contiguous().view(self.num_sums, -1)
+        bvr = bvr.view(self.num_sums, -1)
+        num_bits = self._get_bvr_num_bits()
+        powers = 2 ** torch.arange(num_bits, 
+                                   dtype=torch.int64, 
+                                   device=self.data_device)
+        coeff_sel = torch.empty((bvr.shape[1] * num_bits),
+                               dtype=torch.int32, 
+                               device=self.data_device)
+        iter_size = 2048
+        for i in range(0, bvr.shape[1], iter_size):
+            max_i = min(i + iter_size, bvr.shape[1])
+            bvr_i = bvr[:, i:max_i].to(torch.int64)
+            bin_vec = ((bvr_i.unsqueeze(-1) & powers) != 0).to(torch.int32)
+            bin_vec = bin_vec.view(self.num_sums, -1)
+            max_coeff_i = min(max_i*num_bits, coeff_sel.shape[0])
+            bin_vec_trunc = bin_vec[:, :max_coeff_i].transpose(0, 1)
+            coeff_sel_i = self._bin2dec(bin_vec_trunc, self.num_sums)
+            coeff_sel[i*num_bits:max_coeff_i] = coeff_sel_i.view(-1)
+
+        return coeff_sel[:coeff_sel_len] 
+        
+    def forward(self, x, mode=0):
+        """
+        mode 0: return x
+        mode 1: perform sbvr encoding with naive pytorch, return x
+        mode 2: perform sbvr encoding with customized cuda kernel, return x
+        """
+        if mode == 0:
+            return x
+        
+        elif mode == 1:
+            # cleanup the previous encoding info
+            self.clean_encode_info(release_memory=False)
+            
+            # assign x to data, just to reuse the code
+            data = x
+            
+            # pad the input and reshape the data
+            if data.dim() != 2:
+                data = data.reshape(-1, data.shape[-1])
+            self.data_device = data.device
+            self.original_dtype = data.dtype
+            self.original_data_shape = data.shape
+            padded_data_len = (data.shape[1] + self.bvr_len - 1) // self.bvr_len * self.bvr_len
+            self.padded_data_shape = (data.shape[0], padded_data_len)
+            
+            padded_data_diff = padded_data_len - data.shape[1]
+            if padded_data_diff > 0:
+                data = torch.cat([data, torch.zeros(data.shape[0], padded_data_diff, device=data.device, dtype=data.dtype)], dim=1)
+            data = data.view(-1, 1, self.bvr_len, 1)
+            
+            # perform coeff searching
+            candidate_matrix = self._get_candidate_mm_ext()
+            n_ss_row = candidate_matrix.shape[0]
+            n_ss_col = candidate_matrix.shape[1]
+            candidate_matrix = candidate_matrix.view(1, n_ss_row, 1, n_ss_col)
+            
+            # main logic
+            diff = (data - candidate_matrix)**2 # diff.shape: (-1, n_ss_row, bvr_len, n_ss_col)
+            diff_selected, coeff_comb_indices = diff.min(dim=-1) # diff_selected.shape: (-1, n_ss_row, bvr_len), coeff_comb_indices.shape: (-1, n_ss_row, bvr_len)
+            mse = diff_selected.to(torch.float32).mean(dim=-1) # mse.shape: (-1, n_ss_row)
+            
+            min_indices = mse.argmin(dim=-1) # min_indices.shape: (-1,)
+            group_indices = torch.arange(coeff_comb_indices.shape[0], device=self.data_device)
+            coeff_comb_sel = coeff_comb_indices[group_indices, min_indices, :] # coeff_comb_sel.shape: (-1, bvr_len), use advanced indexing
+            coeff_comb_sel = coeff_comb_sel.flatten()
+            
+            # change the results to sbvr format
+            self.coeff_sel = coeff_comb_sel.to(torch.int32).to(self.data_device)
+            self.coeff_idx = min_indices.to(self.data_device)
+            
+            if self.coeff_set.shape[0] <= 256:
+                self.coeff_idx = self.coeff_idx.to(torch.uint8)
+            else:
+                self.coeff_idx = self.coeff_idx.to(torch.uint16)
+            
+            # change the results to sbvr format
+            bvr = self._change_coeff_sel_to_bvr()
+            bvr = bvr.view(self.num_sums, -1, self.padded_data_shape[-1] // \
+                                                    self._get_bvr_num_bits())
+            bvr = bvr.permute(2, 1, 0).contiguous()
+            self.bvr = bvr
+            
+            coeff_idx = self.coeff_idx.view(-1, self.bvr.shape[0] // \
+                                    (self.bvr_len // self._get_bvr_num_bits()))
+            coeff_idx = coeff_idx.transpose(0, 1).contiguous()
+            self.coeff_idx = coeff_idx
+            
+            return x
+                
+        elif mode == 2:
+            raise NotImplementedError(r_str("Customized cuda kernel is not implemented yet"))
+        
+        else:
+            raise ValueError(f"Invalid mode: {mode}, mode should be 0, 1 or 2")
+        
+    @torch.inference_mode()
+    def decode(self):
+        decoded_tensor = torch.empty(self.padded_data_shape,
+                                      dtype=self.original_dtype,
+                                      device=self.data_device)
+        num_bvr = self.coeff_idx.numel()
+        coeff_sel = self._change_bvr_to_coeff_sel()
+        coeff_idx = self.coeff_idx.transpose(0, 1).contiguous().flatten()
+        for i in range(num_bvr):
+            group_start = i * self.bvr_len
+            group_end = \
+                min(group_start + self.bvr_len, decoded_tensor.numel())
+            group_coeff = self.coeff_set[coeff_idx[i].item()]
+            group_coeff_sel = coeff_sel[group_start:group_end]
+            group_all_points = self._get_all_points(group_coeff)
+            group_data = group_all_points[group_coeff_sel]
+            decoded_tensor.flatten()[group_start:group_end] = group_data
+            
+        # Truncate the tensor to the original shape
+        # TODO: modify this part
+        if self.original_data_shape != self.padded_data_shape:
+            slices = tuple(slice(0, s) for s in self.original_data_shape)
+            decoded_tensor = decoded_tensor[slices]
+        
+        return decoded_tensor
+    
+    def clean_encode_info(self, release_memory=False):
+        self.coeff_sel = None
+        self.coeff_idx = None
+        self.bvr = None
+        
+        self.conversion_complete = False
+        
+        self.data_device = None
+        self.original_dtype = None
+        self.original_data_shape = None
+        self.padded_data_shape = None
+        
+        if release_memory:
+            cleanup_memory()
