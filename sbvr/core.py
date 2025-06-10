@@ -414,8 +414,13 @@ class sbvr(torch.nn.Module):
     
     @torch.inference_mode()
     def forward(self, x):
-        restored_w = self.decode()
-        return x @ restored_w.T
+        '''
+        TODO: Fix this part after prefill kernel is implemented
+        '''
+        if not hasattr(self, 'restored_w'):
+            self.restored_w = self.decode()
+            print(b_str("restoration complete"))
+        return x @ self.restored_w.T
     
 def mm_T(lhs, rhs, bias):
     lhs_bvr = lhs.bvr

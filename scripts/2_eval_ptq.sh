@@ -20,7 +20,7 @@ torchrun --nnodes=1 --nproc_per_node=$5 ptq.py \
 --input_model $1 \
 --do_train False \
 --do_eval True \
---per_device_eval_batch_size 4 \
+--per_device_eval_batch_size 1 \
 --model_max_length 2048 \
 --fp16 False \
 --bf16 True \

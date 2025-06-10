@@ -368,13 +368,13 @@ if __name__ == "__main__":
     # coeff_set_path = os.path.join(profiler.save_path, f"input_coeff_set_info.pt")
     # profile_results = profiler.test_sbvr_to_inputs(coeff_set_path=coeff_set_path, save_profile_results=True)
     # print(profile_results)
-    # profile_results_path = os.path.join(profiler.save_path, f"profile_results.pt")
-    # profiler.printout_profile_results(profile_results_path=profile_results_path)
+    profile_results_path = os.path.join(profiler.save_path, f"profile_results.pt")
+    profiler.printout_profile_results(profile_results_path=profile_results_path)
     # profiler_results = profiler.test_sbvr_to_inputs(coeff_set_path=os.path.join(profiler.save_path, f"input_coeff_set_info.pt"), save_profile_results=False, 
     #                                                 enable_oneshot_encoding=True)
     # profiler.get_per_state_encoding(coeff_set_size=4, num_sums=8, bvr_len=128, n_samples=128, save_coeff_set=True)
     # profiler_results = profiler.test_sbvr_to_inputs(n_samples_per_input_type=1, save_profile_results=False, enable_oneshot_encoding=True, per_state_encoding=True)
     
     # profiler.apply_had_rot_to_down_proj()
-    profiler.get_per_state_encoding(coeff_set_size=4, num_sums=8, bvr_len=128, n_samples=128, save_coeff_set=True, down_proj_only=True)
-    profiler_results = profiler.test_sbvr_to_inputs(save_profile_results=True, enable_oneshot_encoding=True, per_state_encoding=True)
+    # profiler.get_per_state_encoding(coeff_set_size=4, num_sums=8, bvr_len=128, n_samples=128, save_coeff_set=True, down_proj_only=True)
+    # profiler_results = profiler.test_sbvr_to_inputs(save_profile_results=True, enable_oneshot_encoding=True, per_state_encoding=True)

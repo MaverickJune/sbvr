@@ -19,6 +19,7 @@ from utils.process_args import process_args_ptq
 from utils.model_utils import capture_layer_io, get_layer_io_save_path
 
 import sys
+from sbvr_e2e_utils.eval_ppl import eval_e2e_sbvr_ppl
 
 log: Logger = utils.get_logger("spinquant")
 
@@ -77,6 +78,11 @@ def train() -> None:
             token=model_args.access_token,
         )
         log.info("Complete tokenizer loading...")
+        dataset_ppl = eval_e2e_sbvr_ppl(model, tokenizer, device="cuda:0",
+                                        decode_only=False, decode_len=1024, prefill_mode=-1, decode_mode=0)
+        log.info("wiki2 ppl is: {}".format(dataset_ppl))
+        sys.exit(0)
+        
         model.config.use_cache = False
 
         testloader = data_utils.get_wikitext2(

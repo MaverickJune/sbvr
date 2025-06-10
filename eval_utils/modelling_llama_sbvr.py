@@ -57,7 +57,10 @@ from sbvr import mm_T
 from sbvr.core import input_sbvr_mm_T
 
 # import additional utils
-from utils import hadamard_utils
+import transformers
+from utils import hadamard_utils, fuse_norm_utils
+from eval_utils.rotation_utils import get_orthogonal_matrix, rotate_embeddings, rotate_head
+from utils.utils import cleanup_memory
 import os
 import sys
 
@@ -1339,9 +1342,10 @@ class LlamaForSbvrLM(LlamaPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
-        self.pseudo_fuse_layer_norms()
+        # self.pseudo_fuse_layer_norms()
+        # self.rotate_model()
         
-    def load_sbvr_weights(self, root_sbvr_path: str = None, sbvrizer_path: str = None):
+    def load_sbvr_weights(self, root_sbvr_path: str = None, sbvrizer_path: str = None, device: str = "cuda:0"):
         if root_sbvr_path is None:
             raise ValueError("root_sbvr_path must be provided")
         if sbvrizer_path is None:
@@ -1371,10 +1375,10 @@ class LlamaForSbvrLM(LlamaPreTrainedModel):
             layer.mlp.gate_proj = sbvr.load(sbvr_gate_proj_path)
             layer.mlp.down_proj = sbvr.load(sbvr_down_proj_path)
             
-            layer.self_attn.qkv_sbvrizer.load_coeff_set(torch.load(sbvrizer_qkv_path)["coeff_set"])
-            layer.self_attn.o_sbvrizer.load_coeff_set(torch.load(sbvrizer_o_proj_path)["coeff_set"])
-            layer.mlp.upgate_sbvrizer.load_coeff_set(torch.load(sbvrizer_upgate_path)["coeff_set"])
-            layer.mlp.down_sbvrizer.load_coeff_set(torch.load(sbvrizer_down_path)["coeff_set"])
+            layer.self_attn.qkv_sbvrizer.load_coeff_set(torch.load(sbvrizer_qkv_path, map_location=device)["coeff_set"])
+            layer.self_attn.o_sbvrizer.load_coeff_set(torch.load(sbvrizer_o_proj_path, map_location=device)["coeff_set"])
+            layer.mlp.upgate_sbvrizer.load_coeff_set(torch.load(sbvrizer_upgate_path, map_location=device)["coeff_set"])
+            layer.mlp.down_sbvrizer.load_coeff_set(torch.load(sbvrizer_down_path, map_location=device)["coeff_set"])
             
         print(f"Loaded SBVR weights from {root_sbvr_path}")
 
@@ -1405,6 +1409,11 @@ class LlamaForSbvrLM(LlamaPreTrainedModel):
         for W in [self.model.embed_tokens]:
             W_ = W.weight.data.double()
             W.weight.data = (W_ - W_.mean(dim=-1, keepdim=True)).to(W.weight.data.dtype)
+            
+        fuse_norm_utils.fuse_ln_linear(
+            self.model.norm,
+            [self.lm_head]
+        )
         
         for layer in self.model.layers:
             W_norm = layer.post_attention_layernorm.weight.data
@@ -1414,6 +1423,21 @@ class LlamaForSbvrLM(LlamaPreTrainedModel):
             
         W_norm = self.model.norm.weight.data
         self.model.norm.weight.data = torch.ones_like(W_norm)
+        
+    def rotate_model(self):
+        print("Rotating the model...")
+        transformers.set_seed(0)
+        rotate_mode = "hadamard"
+        R1 = get_orthogonal_matrix(self.config.hidden_size, rotate_mode)
+        
+        rotate_embeddings(self, R1)
+        rotate_head(self, R1)
+        cleanup_memory()
+        print("Model rotated")
+        
+    def preprocess_model(self):
+        self.pseudo_fuse_layer_norms()
+        self.rotate_model()
 
     @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
     @replace_return_docstrings(

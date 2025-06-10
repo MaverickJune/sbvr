@@ -20,4 +20,5 @@ python -m sbvr_e2e \
     --weight_num_sums 4 \
     --input_bvr_len 128 \
     --input_num_sums 8 \
-    --input_set_size 4
+    --input_set_size 4 \
+    --measure_ppl
