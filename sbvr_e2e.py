@@ -102,7 +102,7 @@ def main():
         
     if args.measure_ppl:
         ppl = eval_e2e_sbvr_ppl(model, tokenizer, device="cuda:0",
-                                decode_only=False, prefill_mode=0)
+                                decode_only=True, decode_len=10, prefill_mode=0, decode_mode=1)
         
 if __name__ == "__main__":
     main()

@@ -376,8 +376,10 @@ class LlamaSbvrMLP(nn.Module):
                     input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.up_proj)
                 
                 # apply online hadamard transform
+                # x = self.down_sbvrizer(x, mode=mode)
                 had_K, K = hadamard_utils.get_hadK(self.intermediate_size)
                 x = hadamard_utils.matmul_hadU_cuda(x, had_K, K)
+                x = self.down_sbvrizer(x, mode=mode)
                 bvr, coeff_idx, coeff_set = self.down_sbvrizer.bvr, self.down_sbvrizer.coeff_idx, self.down_sbvrizer.coeff_set
                 
                 down_proj = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.down_proj)
