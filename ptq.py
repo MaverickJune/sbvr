@@ -56,6 +56,9 @@ def train() -> None:
     model.cuda()
     model = ptq_model(ptq_args, model, model_args)
     
+    # added for fair comparison with sbvr
+    model = model.to(torch.float16)
+    
     if ptq_args.sbvrize_input:
         if local_rank == 0:
             log.info("Start to sbvrize the model...")
@@ -79,7 +82,7 @@ def train() -> None:
         )
         log.info("Complete tokenizer loading...")
         dataset_ppl = eval_e2e_sbvr_ppl(model, tokenizer, device="cuda:0",
-                                        decode_only=False, decode_len=1024, prefill_mode=-1, decode_mode=0)
+                                        decode_only=False, decode_len=10, prefill_mode=-1, decode_mode=-1)
         log.info("wiki2 ppl is: {}".format(dataset_ppl))
         sys.exit(0)
         

@@ -46,7 +46,10 @@ def get_e2e_sbvr_ppl(model, testenc, device="cuda:0",
             with torch.no_grad():
                 # print(f"shape: {batch[:, :prefill_len].shape}")
                 # sys.exit(0)
-                output = model(batch[:, :prefill_len], past_key_values=kv_cache, mode=prefill_mode)
+                if prefill_mode == -1:
+                    output = model(batch[:, :prefill_len], past_key_values=kv_cache)
+                else:
+                    output = model(batch[:, :prefill_len], past_key_values=kv_cache, mode=prefill_mode)
                 lm_logits = output.logits
                 kv_cache = output.past_key_values
             
@@ -56,7 +59,10 @@ def get_e2e_sbvr_ppl(model, testenc, device="cuda:0",
                     label = batch[:, prefill_len + i + 1].unsqueeze(0)
                     loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
                     
-                    output = model(next_token, past_key_values=kv_cache, mode=decode_mode)
+                    if decode_mode == -1:
+                        output = model(next_token, past_key_values=kv_cache)
+                    else:
+                        output = model(next_token, past_key_values=kv_cache, mode=decode_mode)
                     token_logits = output.logits
                     kv_cache = output.past_key_values
                     loss = loss_fct(
