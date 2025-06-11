@@ -723,6 +723,8 @@ class sbvrizer(torch.nn.Module):
             )
         if not hasattr(self, 'candidate_matrix'):
             self.candidate_matrix = self.coeff_set @ self.bin_combs.T
+            
+        return self.candidate_matrix
     
     @torch.inference_mode()
     def _get_all_points(self, coeff):
@@ -789,7 +791,7 @@ class sbvrizer(torch.nn.Module):
             
             # pad the input and reshape the data
             if data.dim() != 2:
-                data = data.reshape(-1, data.shape[-1])
+                raise ValueError(r_str(f"Input data must be 2D, but got {data.shape} tensor"))
             self.data_device = data.device
             self.original_dtype = data.dtype
             self.original_data_shape = data.shape
@@ -830,6 +832,7 @@ class sbvrizer(torch.nn.Module):
             bvr = self._change_coeff_sel_to_bvr()
             bvr = bvr.view(self.num_sums, -1, self.padded_data_shape[-1] // \
                                                     self._get_bvr_num_bits())
+            
             bvr = bvr.permute(2, 1, 0).contiguous()
             self.bvr = bvr
             
@@ -886,3 +889,15 @@ class sbvrizer(torch.nn.Module):
         
         if release_memory:
             cleanup_memory()
+            
+def load_sbvrizer(filename, device=None) -> sbvrizer:
+    sbvirzer_info = torch.load(filename, map_location=device)
+    num_sums = sbvirzer_info["num_sums"]
+    bvr_len = sbvirzer_info["bvr_len"]
+    coeff_set = sbvirzer_info["coeff_set"]
+    
+    set_size = coeff_set.shape[0]
+    sbvrizer_obj = sbvrizer(bvr_len, num_sums, set_size).to(device)
+    sbvrizer_obj.load_coeff_set(coeff_set)
+    
+    return sbvrizer_obj

@@ -366,6 +366,10 @@ class LlamaSbvrMLP(nn.Module):
                 
                 down_proj = self.down_proj(x)
             elif mode == 1 or mode == 2:
+                # reshape the input to 2D
+                bsz, seq_len = x.shape[0], x.shape[1]
+                x = x.reshape(-1, x.shape[-1])
+                
                 x = self.upgate_sbvrizer(x, mode=mode)
                 bvr, coeff_idx, coeff_set = self.upgate_sbvrizer.bvr, self.upgate_sbvrizer.coeff_idx, self.upgate_sbvrizer.coeff_set
                 x = self.act_fn(input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.gate_proj)) * \
@@ -377,6 +381,9 @@ class LlamaSbvrMLP(nn.Module):
                 bvr, coeff_idx, coeff_set = self.down_sbvrizer.bvr, self.down_sbvrizer.coeff_idx, self.down_sbvrizer.coeff_set
                 
                 down_proj = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.down_proj)
+                
+                # reshape the output to 3D
+                down_proj = down_proj.reshape(bsz, seq_len, -1)
             else:
                 raise ValueError(f"Invalid mode: {mode}")
         
@@ -482,11 +489,19 @@ class LlamaSbvrAttention(nn.Module):
                 key_states = self.k_proj(hidden_states)
                 value_states = self.v_proj(hidden_states)
             elif mode == 1 or mode == 2:
+                # reshape the input to 2D
+                hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
+                
                 hidden_states = self.qkv_sbvrizer(hidden_states, mode=mode)
                 bvr, coeff_idx, coeff_set = self.qkv_sbvrizer.bvr, self.qkv_sbvrizer.coeff_idx, self.qkv_sbvrizer.coeff_set
                 query_states = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.q_proj)
                 key_states = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.k_proj)
                 value_states = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.v_proj)
+                
+                # reshape the output to 3D
+                query_states = query_states.reshape(bsz, q_len, -1)
+                key_states = key_states.reshape(bsz, q_len, -1)
+                value_states = value_states.reshape(bsz, q_len, -1)
             else:
                 raise ValueError(f"invalid mode: {mode}")
 
@@ -556,9 +571,15 @@ class LlamaSbvrAttention(nn.Module):
             if mode == 0:
                 attn_output = self.o_proj(attn_output)
             elif mode == 1 or mode == 2:
+                # reshape the input to 2D
+                attn_output = attn_output.reshape(-1, attn_output.shape[-1])
+                
                 attn_output = self.o_sbvrizer(attn_output, mode=mode)
                 bvr, coeff_idx, coeff_set = self.o_sbvrizer.bvr, self.o_sbvrizer.coeff_idx, self.o_sbvrizer.coeff_set
                 attn_output = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.o_proj)
+                
+                # reshape the output to 3D
+                attn_output = attn_output.reshape(bsz, q_len, -1)
             else:
                 raise ValueError(f"invalid mode: {mode}")
 
@@ -613,11 +634,19 @@ class LlamaSbvrFlashAttention2(LlamaSbvrAttention):
             key_states = self.k_proj(hidden_states)
             value_states = self.v_proj(hidden_states)
         elif mode == 1 or mode == 2:
+            # reshape the input to 2D
+            hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
+            
             hidden_states = self.qkv_sbvrizer(hidden_states, mode=mode)
             bvr, coeff_idx, coeff_set = self.qkv_sbvrizer.bvr, self.qkv_sbvrizer.coeff_idx, self.qkv_sbvrizer.coeff_set
             query_states = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.q_proj)
             key_states = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.k_proj)
             value_states = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.v_proj)
+            
+            # reshape the output to 3D
+            query_states = query_states.reshape(bsz, q_len, -1)
+            key_states = key_states.reshape(bsz, q_len, -1)
+            value_states = value_states.reshape(bsz, q_len, -1)
         else:
             raise ValueError(f"invalid mode: {mode}")
         
@@ -707,9 +736,15 @@ class LlamaSbvrFlashAttention2(LlamaSbvrAttention):
         if mode == 0:
             attn_output = self.o_proj(attn_output)
         elif mode == 1 or mode == 2:
+            # reshape the input to 2D
+            attn_output = attn_output.reshape(-1, attn_output.shape[-1])
+            
             attn_output = self.o_sbvrizer(attn_output, mode=mode)
             bvr, coeff_idx, coeff_set = self.o_sbvrizer.bvr, self.o_sbvrizer.coeff_idx, self.o_sbvrizer.coeff_set
             attn_output = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.o_proj)
+            
+            # reshape the output to 3D
+            attn_output = attn_output.reshape(bsz, q_len, -1)
         else:
             raise ValueError(f"invalid mode: {mode}")
         
@@ -767,11 +802,19 @@ class LlamaSbvrSdpaAttention(LlamaSbvrAttention):
             key_states = self.k_proj(hidden_states)
             value_states = self.v_proj(hidden_states)
         elif mode == 1 or mode == 2:
+            # reshape the input to 2D
+            hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
+            
             hidden_states = self.qkv_sbvrizer(hidden_states, mode=mode)
             bvr, coeff_idx, coeff_set = self.qkv_sbvrizer.bvr, self.qkv_sbvrizer.coeff_idx, self.qkv_sbvrizer.coeff_set
             query_states = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.q_proj)
             key_states = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.k_proj)
             value_states = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.v_proj)
+            
+            # reshape the output to 3D
+            query_states = query_states.reshape(bsz, q_len, -1)
+            key_states = key_states.reshape(bsz, q_len, -1)
+            value_states = value_states.reshape(bsz, q_len, -1)
         else:
             raise ValueError(f"invalid mode: {mode}")
 
@@ -839,9 +882,15 @@ class LlamaSbvrSdpaAttention(LlamaSbvrAttention):
         if mode == 0:
             attn_output = self.o_proj(attn_output)
         elif mode == 1 or mode == 2:
+            # reshape the input to 2D
+            attn_output = attn_output.reshape(-1, attn_output.shape[-1])
+            
             attn_output = self.o_sbvrizer(attn_output, mode=mode)
             bvr, coeff_idx, coeff_set = self.o_sbvrizer.bvr, self.o_sbvrizer.coeff_idx, self.o_sbvrizer.coeff_set
             attn_output = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.o_proj)
+            
+            # reshape the output to 3D
+            attn_output = attn_output.reshape(bsz, q_len, -1)
         else:
             raise ValueError(f"invalid mode: {mode}")
 
@@ -1438,6 +1487,44 @@ class LlamaForSbvrLM(LlamaPreTrainedModel):
     def preprocess_model(self):
         self.pseudo_fuse_layer_norms()
         self.rotate_model()
+        
+    def convert_model_dtype(self, dtype: torch.dtype = torch.float16):
+        self.to(dtype)
+        for layer in self.model.layers:
+            # self_attn
+            layer.self_attn.q_proj = layer.self_attn.q_proj.to(dtype)
+            layer.self_attn.q_proj.original_dtype = dtype
+            
+            layer.self_attn.k_proj = layer.self_attn.k_proj.to(dtype)
+            layer.self_attn.k_proj.original_dtype = dtype
+            
+            layer.self_attn.v_proj = layer.self_attn.v_proj.to(dtype)
+            layer.self_attn.v_proj.original_dtype = dtype
+            
+            layer.self_attn.o_proj = layer.self_attn.o_proj.to(dtype)
+            layer.self_attn.o_proj.original_dtype = dtype
+            
+            layer.self_attn.qkv_sbvrizer = layer.self_attn.qkv_sbvrizer.to(dtype)
+            layer.self_attn.qkv_sbvrizer.original_dtype = dtype
+            
+            layer.self_attn.o_sbvrizer = layer.self_attn.o_sbvrizer.to(dtype)
+            layer.self_attn.o_sbvrizer.original_dtype = dtype
+            
+            # mlp
+            layer.mlp.up_proj = layer.mlp.up_proj.to(dtype)
+            layer.mlp.up_proj.original_dtype = dtype
+            
+            layer.mlp.gate_proj = layer.mlp.gate_proj.to(dtype)
+            layer.mlp.gate_proj.original_dtype = dtype
+            
+            layer.mlp.down_proj = layer.mlp.down_proj.to(dtype)
+            layer.mlp.down_proj.original_dtype = dtype
+            
+            layer.mlp.upgate_sbvrizer = layer.mlp.upgate_sbvrizer.to(dtype)
+            layer.mlp.upgate_sbvrizer.original_dtype = dtype
+            
+            layer.mlp.down_sbvrizer = layer.mlp.down_sbvrizer.to(dtype)
+            layer.mlp.down_sbvrizer.original_dtype = dtype
 
     @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
     @replace_return_docstrings(

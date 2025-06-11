@@ -7,7 +7,7 @@ def get_partial_state(args):
     model_name = args.input_model
     ref = LlamaForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=torch.float16,
         device_map="cpu"
     ).eval()
     

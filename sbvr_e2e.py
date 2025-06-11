@@ -80,8 +80,11 @@ def main():
         
         if process_word_embeddings:
             model.lm_head.weight.data = model.model.embed_tokens.weight.data.clone()
-        model = model.to(torch.bfloat16)
         model.load_sbvr_weights(args.root_sbvr_path, args.sbvrizer_path)
+        
+        # convert the model to float16
+        model.convert_model_dtype(dtype=torch.float16)
+        
         model.preprocess_model()
         model = model.to("cuda:0")
         model.eval()
