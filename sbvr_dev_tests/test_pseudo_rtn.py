@@ -2,6 +2,7 @@ import torch
 import os
 import sys
 from sbvr_e2e_utils.utils import r_str, y_str, b_str, g_str, get_errors, print_errors
+from utils.utils import cleanup_memory
 from tqdm import tqdm
 
 class PseudoRTN:
@@ -45,9 +46,12 @@ class PseudoRTN:
         
         return x_q, selected_indices.to(torch.uint8)
     
-    def load_input_data(self, layer_idx):
+    def load_input_data(self, layer_idx, device=None):
         input_path = os.path.join(self.input_data_path, self.convert_layer_to_input_filename(layer_idx))
-        return torch.load(input_path, map_location=self.device)
+        if device is not None:
+            return torch.load(input_path, map_location=device)
+        else:
+            return torch.load(input_path, map_location=self.device)
     
     def apply_rtn_to_input(self, x):
         if x.dim() != 2:
@@ -64,7 +68,7 @@ class PseudoRTN:
             
         return x_q.reshape(x_orig_shape)
         
-    def test_rtn_acc_module(self, layer_idx, module_name, n_samples=50):
+    def test_rtn_acc_module(self, layer_idx, module_name, n_samples=50, input_data=None):
         module_name_to_sbvrizer_dict = {
             "q_proj": "k_proj",
             "k_proj": "k_proj",
@@ -75,14 +79,25 @@ class PseudoRTN:
             "down_proj": "down_proj"
         }
         io_indicator = "output" if module_name in ["v_proj"] else "input"
-        input_data = self.load_input_data(layer_idx)
+        if input_data is None:
+            input_data = self.load_input_data(layer_idx)
         batched_proj_input = input_data[io_indicator][module_name_to_sbvrizer_dict[module_name]]
         batched_proj_input = batched_proj_input.reshape(-1, batched_proj_input.shape[-1])
         select_idx = torch.randint(0, batched_proj_input.shape[0], (n_samples,))
-        batched_proj_input = batched_proj_input[select_idx]
+        batched_proj_input = batched_proj_input[select_idx].to(self.device)
         
         x_q = self.apply_rtn_to_input(batched_proj_input)
         print_errors(batched_proj_input, x_q)
+        
+    def test_rtn_acc_module_all_layers(self, n_layers=16):
+        module_name_list = ["k_proj", "o_proj", "gate_proj", "down_proj"]
+        for layer_idx in range(n_layers):
+            print(b_str(f"testing layer {layer_idx}...\n"))
+            input_data = self.load_input_data(layer_idx, device="cpu")
+            for module_name in module_name_list:
+                print(f"{layer_idx}_{module_name}")
+                self.test_rtn_acc_module(layer_idx=layer_idx, module_name=module_name, input_data=input_data)
+            cleanup_memory()
         
         
 if __name__ == "__main__":
@@ -100,7 +115,13 @@ if __name__ == "__main__":
         rtn_worker = PseudoRTN(MODEL_NAME, W_BITS, device, rtn_bits=5)
         rtn_worker.test_rtn_acc_module(layer_idx=layer_idx, module_name=module_name)
         
-    proj_test(layer_idx=0, module_name="q_proj")
+    def all_layers_test():
+        rtn_worker = PseudoRTN(MODEL_NAME, W_BITS, device, rtn_bits=5)
+        rtn_worker.test_rtn_acc_module_all_layers(n_layers=16)
+        
+    # randn_test()
+    # proj_test(layer_idx=0, module_name="q_proj")
+    all_layers_test()
     
     
    
