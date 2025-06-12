@@ -4,6 +4,7 @@ from sbvr import load as sbvr_load
 from sbvr.core import sbvrizer, load_sbvrizer, input_sbvr_mm_T
 from sbvr.utils import print_errors, get_errors, r_str, y_str, b_str, g_str
 from contextlib import nullcontext
+import torch.nn.functional as F
 
 import os
 import sys
@@ -81,10 +82,10 @@ class SpeedAbalationHelper:
         }
         input_path = os.path.join(self.input_data_path, self.convert_layer_to_input_filename(layer_idx))
         io_indicator = "output" if module_name in ["v_proj"] else "input"
-        batched_qkv_proj_input = torch.load(input_path, map_location=self.device)[io_indicator][module_name_to_sbvrizer_dict[module_name]]
-        batched_qkv_proj_input = batched_qkv_proj_input.reshape(-1, batched_qkv_proj_input.shape[-1])
-        select_idx = torch.randint(0, batched_qkv_proj_input.shape[0], (1,))
-        self.target_input = batched_qkv_proj_input[select_idx]
+        batched_proj_input = torch.load(input_path, map_location=self.device)[io_indicator][module_name_to_sbvrizer_dict[module_name]]
+        batched_proj_input = batched_proj_input.reshape(-1, batched_proj_input.shape[-1])
+        select_idx = torch.randint(0, batched_proj_input.shape[0], (1,))
+        self.target_input = batched_proj_input[select_idx]
         
         # prepare the weight sbvr
         weight_sbvr_path = os.path.join(self.weight_sbvr_path, self.convert_params_to_weight_sbvr_filename(layer_idx, module_name))
@@ -97,8 +98,8 @@ class SpeedAbalationHelper:
     @torch.inference_mode()
     def test_speed_abalation(
         self,
-        warmup_iters: int = 10,
-        measure_iters: int = 100,
+        warmup_iters: int = 100,
+        measure_iters: int = 1000,
         sync_ctx=nullcontext(),
     ):
         if any(
@@ -166,6 +167,51 @@ class SpeedAbalationHelper:
         
         return self.results
     
+    @torch.inference_mode()
+    def test_diff_speed(
+        self, 
+        warmup_iters: int = 100,
+        measure_iters: int = 1000,
+        sync_ctx=nullcontext(),
+    ):
+        def _record(fn):
+            start, end = (
+                torch.cuda.Event(enable_timing=True),
+                torch.cuda.Event(enable_timing=True),
+            )
+            start.record()
+            out = fn()
+            end.record()
+            torch.cuda.synchronize()
+            return start.elapsed_time(end), out
+        
+        def _mean_std(times):
+            t = torch.tensor(times, dtype=torch.float32, device="cpu")
+            return float(t.mean()), float(t.std(unbiased=False))
+        
+        candidate_matrix = torch.randn(1, 4, 1, 256).contiguous()
+        data = torch.randn(16, 1, 128, 1).contiguous() # (1, 2048)
+        
+        # warmup
+        with torch.no_grad(), sync_ctx:
+            for _ in range(warmup_iters):
+                _ = (data - candidate_matrix)**2
+                # dist = F.pairwise_distance(data, candidate_matrix, p=1)
+                # _ = torch.abs(data - candidate_matrix)
+        torch.cuda.synchronize()
+    
+        times = []
+        with torch.no_grad(), sync_ctx:
+            for _ in range(measure_iters):
+                t, _ = _record(
+                    lambda: (data - candidate_matrix)**2
+                    # lambda: F.pairwise_distance(data, candidate_matrix, p=1)
+                    # lambda: torch.abs(data - candidate_matrix)
+                )
+                times.append(t)
+                
+        return _mean_std(times)
+    
     def print_results(self):
         results_log = r_str("\nSpeed Abalation Results:") + \
             g_str(f"\n\tInput SBVR: ") + f"{self.results['input_sbvrize_ms_mean']:.4f} ± {self.results['input_sbvrize_ms_std']:.4f} ms" + \
@@ -180,6 +226,11 @@ if __name__ == "__main__":
     device = "cuda:0"
     
     helper = SpeedAbalationHelper(model_name, w_bits, device)
+    # # test the speed of diff
+    # diff_mean, diff_std = helper.test_diff_speed()
+    # print(f"Diff speed: {diff_mean:.4f} ± {diff_std:.4f} ms")
+    
+    # test the speed of e2e sbvr
     helper.prepare_speed_abalation(layer_idx=0, module_name="down_proj")
     results = helper.test_speed_abalation()
     helper.print_results()
