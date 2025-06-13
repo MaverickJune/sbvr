@@ -19,7 +19,8 @@ setup(
             name='sbvr.sbvr_cuda',
             sources=[
                 'sbvr/kernels/sbvr_ops.cpp', 
-                'sbvr/kernels/sbvr_kernel.cu'
+                'sbvr/kernels/sbvr_kernel.cu',
+                'sbvr/kernels/input_kernel.cu'
             ],
             include_dirs=[
                 cutlass_dir,
