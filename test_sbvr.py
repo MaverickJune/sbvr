@@ -429,8 +429,8 @@ if __name__ == "__main__":
     mat_len = sys.argv[1]
     sbvr_max_sums = sys.argv[2]
     
-    sbvr_randn_test(int(mat_len), int(sbvr_max_sums), device=device)
-    sbvr_randn_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
+    # sbvr_randn_test(int(mat_len), int(sbvr_max_sums), device=device)
+    # sbvr_randn_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_store_and_load_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_mat_mat_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device)

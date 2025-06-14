@@ -2,11 +2,12 @@ import torch
 import os
 import sys
 from sbvr_e2e_utils.utils import r_str, y_str, b_str, g_str, get_errors, print_errors
+from sbvr import _sbvr_input_transfrom
 from utils.utils import cleanup_memory
 from tqdm import tqdm
 
 class PseudoRTN:
-    def __init__(self, model_name, w_bits, device="cuda:0", rtn_bits=5):
+    def __init__(self, model_name, w_bits, device="cuda:0", rtn_bits=6):
         self.model_name = self.model_name_formatter(model_name, w_bits)
         self.input_data_path = os.path.join(
             os.path.dirname(
@@ -15,7 +16,9 @@ class PseudoRTN:
         )
         self.device = device
         self.rtn_bits = rtn_bits
+        self.rtn_max_num = 2 ** (rtn_bits - 1) - 1
         self.rtn_board = self.get_rtn_board(rtn_bits).to(device)
+        self.pseudo_rtn_pivots = self.get_rtn_pivots()
     
     def model_name_formatter(self, model_name, w_bits, a_bits=16, kv_bits=16):
         model_name = model_name.replace("/", "_")
@@ -23,52 +26,16 @@ class PseudoRTN:
     
     def convert_layer_to_input_filename(self, layer_idx):
         return f"{layer_idx:03d}.pt"
-    
+
     def get_rtn_board(self, rtn_bits):
-        max_num = 2 ** rtn_bits - 1
-        rtn_board = torch.arange(-max_num, max_num + 1, 1, dtype=torch.float16, device=self.device)
+        rtn_board = torch.arange(-self.rtn_max_num, self.rtn_max_num + 1, 1, dtype=torch.float16, device=self.device)
         return rtn_board
     
-    @torch.inference_mode()
-    def apply_pseudo_rtn(self, x):
-        if x.dim() != 2 or x.shape[0] != 1:
-            raise ValueError(f"x must be a 2D tensor with shape (1, n), but got {x.shape}")
-        x = x.to(self.device)
-        x = x.reshape(-1, 1)
-        a = x.min()
-        b = x.max()
-        s = max(abs(a), abs(b)) / 31
-        scaled_rtn_board = self.rtn_board * s
-        selected_indices = torch.argmin(torch.abs(x - scaled_rtn_board), dim=-1)
-        
-        x_q = scaled_rtn_board[selected_indices]
-        x_q = x_q.reshape(1, -1)
-        
-        return x_q, selected_indices.to(torch.uint8)
+    def get_rtn_pivots(self):
+        pseudo_rtn_pivots = [2 ** i for i in range(0, self.rtn_bits, 1)] + [-self.rtn_max_num]
+        return torch.tensor(pseudo_rtn_pivots, dtype=torch.int16, device=self.device)
     
-    def load_input_data(self, layer_idx, device=None):
-        input_path = os.path.join(self.input_data_path, self.convert_layer_to_input_filename(layer_idx))
-        if device is not None:
-            return torch.load(input_path, map_location=device)
-        else:
-            return torch.load(input_path, map_location=self.device)
-    
-    def apply_rtn_to_input(self, x):
-        if x.dim() != 2:
-            raise ValueError("x must be a 2D tensor")
-        x_orig_shape = x.shape
-        
-        x = x.reshape(-1, 128)
-        x_q = torch.zeros_like(x)
-        
-        for i in tqdm(range(x.shape[0]), desc="applying RTN quantization", ncols=80):
-            xt = x[i].view(1, -1)
-            xt_q, _ = self.apply_pseudo_rtn(xt)
-            x_q[i] = xt_q
-            
-        return x_q.reshape(x_orig_shape)
-        
-    def test_rtn_acc_module(self, layer_idx, module_name, n_samples=50, input_data=None):
+    def get_module_sample_from_raw_input(self, input_data, module_name, n_samples=1, dtype=torch.float16):
         module_name_to_sbvrizer_dict = {
             "q_proj": "k_proj",
             "k_proj": "k_proj",
@@ -79,12 +46,68 @@ class PseudoRTN:
             "down_proj": "down_proj"
         }
         io_indicator = "output" if module_name in ["v_proj"] else "input"
-        if input_data is None:
-            input_data = self.load_input_data(layer_idx)
         batched_proj_input = input_data[io_indicator][module_name_to_sbvrizer_dict[module_name]]
         batched_proj_input = batched_proj_input.reshape(-1, batched_proj_input.shape[-1])
         select_idx = torch.randint(0, batched_proj_input.shape[0], (n_samples,))
-        batched_proj_input = batched_proj_input[select_idx].to(self.device)
+        batched_proj_input = batched_proj_input[select_idx].to(self.device).to(dtype)
+        
+        return batched_proj_input
+        
+    @torch.inference_mode()
+    def apply_pseudo_rtn(self, x, return_scale=False):
+        if x.dim() != 2 or x.shape[0] != 1:
+            raise ValueError(f"x must be a 2D tensor with shape (1, n), but got {x.shape}")
+        x = x.to(self.device)
+        x = x.reshape(-1, 1)
+        a = x.min()
+        b = x.max()
+        s = max(abs(a), abs(b)) / self.rtn_max_num
+        scaled_rtn_board = self.rtn_board * s
+        selected_indices = torch.argmin(torch.abs(x - scaled_rtn_board), dim=-1)
+        
+        x_q = scaled_rtn_board[selected_indices]
+        x_q = x_q.reshape(1, -1)
+        if return_scale:
+            return x_q, selected_indices.to(torch.uint8), s
+        else:
+            return x_q, selected_indices.to(torch.uint8)
+    
+    def load_input_data(self, layer_idx, device=None):
+        input_path = os.path.join(self.input_data_path, self.convert_layer_to_input_filename(layer_idx))
+        if device is not None:
+            return torch.load(input_path, map_location=device)
+        else:
+            return torch.load(input_path, map_location=self.device)
+    
+    def apply_rtn_to_input(self, x, return_scale=False):
+        if x.dim() != 2:
+            raise ValueError("x must be a 2D tensor")
+        x_orig_shape = x.shape
+        
+        x = x.reshape(-1, 128)
+        x_q = torch.zeros_like(x)
+        
+        if return_scale:
+            scales = torch.zeros(x.shape[0], device=x.device)
+        
+        for i in tqdm(range(x.shape[0]), desc="applying RTN quantization", ncols=80):
+            xt = x[i].view(1, -1)
+            if not return_scale:
+                xt_q, _ = self.apply_pseudo_rtn(xt)
+            else:
+                xt_q, _, s = self.apply_pseudo_rtn(xt, return_scale=True)
+                scales[i] = s
+            x_q[i] = xt_q
+        
+        if return_scale:
+            return x_q.reshape(x_orig_shape), scales
+        else:
+            return x_q.reshape(x_orig_shape)
+        
+    def test_rtn_acc_module(self, layer_idx, module_name, n_samples=50, input_data=None):
+        if input_data is None:
+            input_data = self.load_input_data(layer_idx)
+        batched_proj_input = self.get_module_sample_from_raw_input(input_data, module_name, n_samples)
         
         x_q = self.apply_rtn_to_input(batched_proj_input)
         print_errors(batched_proj_input, x_q)
@@ -98,6 +121,70 @@ class PseudoRTN:
                 print(f"{layer_idx}_{module_name}")
                 self.test_rtn_acc_module(layer_idx=layer_idx, module_name=module_name, input_data=input_data)
             cleanup_memory()
+            
+    def test_sbvr_input_transform_rtn(self, layer_idx, module_name):
+        input_data = self.load_input_data(layer_idx, device="cpu")
+        proj_input = self.get_module_sample_from_raw_input(input_data, module_name, n_samples=1, dtype=torch.float16)
+        
+        # sbvr input transform
+        out_bvr, scales = _sbvr_input_transfrom(proj_input, nRTN=self.rtn_bits, group_size=128)
+        
+        # _, scales_py = self.apply_rtn_to_input(proj_input, return_scale=True)
+        # print_errors(scales, scales_py)
+        
+        restored_proj_input = self.decode_sbvr_rtn(proj_input, out_bvr, scales)
+        print_errors(proj_input, restored_proj_input)
+        
+    def uint32_to_bitvector(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Convert a tensor of uint32 values to their 32-bit binary representation.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Tensor of arbitrary shape whose dtype is torch.uint32.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor of shape (*x.shape, 32) and dtype torch.uint8
+            containing the bit-vectors.  Index 0 is the least-significant bit.
+        """
+        if x.dtype != torch.uint32:
+            raise TypeError("Input tensor must have dtype=torch.uint32")
+
+        # use an int64 shift mask – rshift for int64 *is* implemented on CUDA
+        shifts = torch.arange(32, device=x.device, dtype=torch.int64)
+
+        # promote to int64 (safe: all uint32 values fit in positive int64 range)
+        x64 = x.to(torch.int64)
+
+        # logical right-shift, mask the LSB, cast to uint8
+        bits = ((x64.unsqueeze(-1) >> shifts) & 1).to(torch.uint8)
+        return bits
+        
+    def decode_sbvr_rtn(self, input_data, out_bvr=None, scales=None):
+        '''
+        out_bvr: low_bit_pos -> high_bit_pos
+        '''
+        if out_bvr is None or scales is None:
+            raise ValueError("out_bvr and scales must be provided")
+        _nRTN = self.rtn_bits + 1
+        restored_input = torch.zeros_like(input_data)
+        
+        out_bvr = out_bvr.reshape(-1, _nRTN)
+        for i in tqdm(range(out_bvr.shape[0]), desc="decoding sbvr rtn", ncols=80):
+            if i % 4 == 0:
+                s = scales[i//4]
+                scaled_pivots = self.pseudo_rtn_pivots * s
+                scaled_pivots = scaled_pivots.to(out_bvr.device)
+            xt = out_bvr[i].view(-1)
+            xt = self.uint32_to_bitvector(xt)
+            scaled_bitvecs = xt * scaled_pivots.unsqueeze(-1)      
+            pr = scaled_bitvecs.sum(dim=0)
+            restored_input[:, i*32 : (i + 1)*32] = pr.view(1, -1)
+            
+        return restored_input
         
         
 if __name__ == "__main__":
@@ -106,22 +193,28 @@ if __name__ == "__main__":
     device = "cuda:0"
     
     def randn_test():
-        rtn_worker = PseudoRTN(MODEL_NAME, W_BITS, device, rtn_bits=5)
+        rtn_worker = PseudoRTN(MODEL_NAME, W_BITS, device, rtn_bits=7)
         x = torch.randn(1, 128, dtype=torch.float16, device="cuda:0")
         x_q, selected_indices = rtn_worker.apply_pseudo_rtn(x)
         print_errors(x, x_q)
         
     def proj_test(layer_idx, module_name):
-        rtn_worker = PseudoRTN(MODEL_NAME, W_BITS, device, rtn_bits=5)
+        rtn_worker = PseudoRTN(MODEL_NAME, W_BITS, device, rtn_bits=7)
         rtn_worker.test_rtn_acc_module(layer_idx=layer_idx, module_name=module_name)
         
     def all_layers_test():
-        rtn_worker = PseudoRTN(MODEL_NAME, W_BITS, device, rtn_bits=5)
+        rtn_worker = PseudoRTN(MODEL_NAME, W_BITS, device, rtn_bits=7)
         rtn_worker.test_rtn_acc_module_all_layers(n_layers=16)
+        
+    def sbvr_input_transform_test():
+        rtn_worker = PseudoRTN(MODEL_NAME, W_BITS, device, rtn_bits=7)
+        rtn_worker.test_sbvr_input_transform_rtn(layer_idx=0, module_name="q_proj")
+        
         
     # randn_test()
     # proj_test(layer_idx=0, module_name="q_proj")
-    all_layers_test()
+    # all_layers_test()
+    sbvr_input_transform_test()
     
     
    

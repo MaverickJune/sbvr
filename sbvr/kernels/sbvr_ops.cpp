@@ -4,6 +4,7 @@
 #include <iostream>
 #include <cstdint>
 #include <assert.h>
+#include <tuple>
 
 // Declare the kernel launcher (templated in the actual .cu file)
 void launch_cuda_sbvr_mm_T(
@@ -128,14 +129,14 @@ torch::Tensor sbvr_row_deq_mm_T(
 }
 
 // PyTorch wrapper for sbvr input transform
-torch::Tensor sbvr_input_transfrom(
+std::tuple<torch::Tensor, torch::Tensor> sbvr_input_transfrom(
     torch::Tensor x,
-    int nRTN = 6,
+    int nRTN = 7,
     int group_size = 128)
 {
     const int M = x.size(0);
     const int K = x.size(1);
-    const int _nRTN = nRTN + 2;
+    const int _nRTN = nRTN + 1;
     const int c_ratio = 32 / _nRTN;
     const int num_groups = K / group_size;
 
@@ -150,7 +151,7 @@ torch::Tensor sbvr_input_transfrom(
         nRTN
     );
 
-    return (out_bvr, scales);
+    return std::make_tuple(out_bvr, scales);
 }
 
 void sbvr_cuda_init() 
