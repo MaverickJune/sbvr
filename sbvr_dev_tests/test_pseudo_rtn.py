@@ -7,6 +7,8 @@ from sbvr import load as sbvr_load
 from utils.utils import cleanup_memory
 from tqdm import tqdm
 
+import time
+
 class PseudoRTN:
     def __init__(self, model_name, w_bits, device="cuda:0", rtn_bits=6):
         self.model_name = self._model_name_formatter(model_name, w_bits)
@@ -26,6 +28,8 @@ class PseudoRTN:
         self.rtn_max_num = 2 ** (rtn_bits - 1) - 1
         self.rtn_board = self._get_rtn_board(rtn_bits).to(device)
         self.pseudo_rtn_pivots = self._get_rtn_pivots()
+        
+        self.rtn_sbvr_bias = None
     
     def _model_name_formatter(self, model_name, w_bits, a_bits=16, kv_bits=16):
         model_name = model_name.replace("/", "_")
@@ -45,6 +49,7 @@ class PseudoRTN:
         
         weight_sbvr_path = os.path.join(self.weight_sbvr_path, f"sbvr_layer_{layer_idx}_{module_indicator}.{module_name}.module.pt")
         self.weight_sbvr = sbvr_load(weight_sbvr_path, device=self.device, apply_dtype_conv=True, target_dtype=torch.float16)
+        self.rtn_sbvr_bias = self.weight_sbvr._get_dummy_bias()
 
     def _get_rtn_board(self, rtn_bits):
         rtn_board = torch.arange(-self.rtn_max_num, self.rtn_max_num + 1, 1, dtype=torch.float16, device=self.device)
@@ -175,10 +180,9 @@ class PseudoRTN:
         return restored_input
     
     @torch.inference_mode()
-    def _apply_rtn_sbvr_mm_T(self, out_bvr, scales):
+    def _apply_rtn_sbvr_mm_T(self, out_bvr, scales, bias):
         if self.weight_sbvr is None:
             raise ValueError("weight_sbvr is not set")
-        bias = self.weight_sbvr._get_dummy_bias()
         return _rtn_sbvr_1xtN_mm_T(
             l_bvr = out_bvr,
             l_scales = scales,
@@ -216,7 +220,10 @@ class PseudoRTN:
         out_bvr, scales = _sbvr_input_transfrom(proj_input, nRTN=self.rtn_bits, group_size=128)
         
         restored_proj_input = self._decode_sbvr_rtn(proj_input, out_bvr, scales)
+        print("Original vs Restored via SBVR input transform")
         print_errors(proj_input, restored_proj_input)
+        
+        print("Restored via RTN vs Restored via SBVR input transform")
         print_errors(rtn_encoded_input, restored_proj_input)
         
     def test_rtn_sbvr_mm_T(self, layer_idx, module_name):
@@ -227,7 +234,7 @@ class PseudoRTN:
         proj_input = self._get_module_sample_from_raw_input(input_data, module_name, n_samples=1, dtype=torch.float16)
         
         out_bvr, scales = _sbvr_input_transfrom(proj_input, nRTN=self.rtn_bits, group_size=128)
-        out = self._apply_rtn_sbvr_mm_T(out_bvr, scales)
+        out = self._apply_rtn_sbvr_mm_T(out_bvr, scales, self.rtn_sbvr_bias)
         
         # emulate the mm_T kernel results
         restored_proj_input = self._decode_sbvr_rtn(proj_input, out_bvr, scales)
@@ -235,6 +242,132 @@ class PseudoRTN:
         
         print_errors(out_emulated, out)
         
+    def test_rtn_sbvr_ablation(self, layer_idx, module_name,
+                               warmup_iters=50, measure_iters=1000):
+        if self.weight_sbvr is None:
+            self._set_weight_sbvr(layer_idx, module_name)
+        
+        # prepare the input data
+        input_data = self._load_input_data(layer_idx, device="cpu")
+        proj_input = self._get_module_sample_from_raw_input(input_data, module_name, n_samples=1, dtype=torch.float16)
+        
+        # warm up -> measurement patterns
+        # 1. input transform
+        for _ in range(warmup_iters):
+            out_bvr, scales = _sbvr_input_transfrom(proj_input, nRTN=self.rtn_bits, group_size=128)
+        torch.cuda.synchronize()
+        
+        start_evt = torch.cuda.Event(enable_timing=True)
+        end_evt   = torch.cuda.Event(enable_timing=True)
+        start_host = time.perf_counter()
+        start_evt.record()
+        for _ in range(measure_iters):
+            out_bvr, scales = _sbvr_input_transfrom(proj_input, nRTN=self.rtn_bits, group_size=128)
+        end_evt.record()
+        torch.cuda.synchronize()
+        host_ms = (time.perf_counter() - start_host) * 1000 / measure_iters
+        device_ms = start_evt.elapsed_time(end_evt) / measure_iters
+        launch_ms = device_ms - host_ms
+        
+        print(b_str(f"input_transform time"))
+        print(f"Host time: {host_ms:.4f} ms, Device time: {device_ms:.4f} ms, Launch time: {launch_ms:.4f} ms")
+        
+        # 2. rtn sbvr mm_T
+        for _ in range(warmup_iters):
+            out = _rtn_sbvr_1xtN_mm_T(
+                l_bvr = out_bvr,
+                l_scales = scales,
+                r_bvr = self.weight_sbvr.bvr,
+                r_coeff_idx = self.weight_sbvr.coeff_idx,
+                r_coeff_cache = self.weight_sbvr.coeff_cache,
+                bias = self.rtn_sbvr_bias,
+                nRTN = self.rtn_bits
+            )
+        torch.cuda.synchronize()
+        
+        start_evt = torch.cuda.Event(enable_timing=True)
+        end_evt   = torch.cuda.Event(enable_timing=True)
+        start_host = time.perf_counter()
+        start_evt.record()
+        for _ in range(measure_iters):
+            out = _rtn_sbvr_1xtN_mm_T(
+                l_bvr = out_bvr,
+                l_scales = scales,
+                r_bvr = self.weight_sbvr.bvr,
+                r_coeff_idx = self.weight_sbvr.coeff_idx,
+                r_coeff_cache = self.weight_sbvr.coeff_cache,
+                bias = self.rtn_sbvr_bias,
+                nRTN = self.rtn_bits
+            )
+        end_evt.record()
+        torch.cuda.synchronize()
+        host_ms = (time.perf_counter() - start_host) * 1000 / measure_iters
+        device_ms = start_evt.elapsed_time(end_evt) / measure_iters
+        launch_ms = device_ms - host_ms
+        
+        print(b_str(f"rtn_sbvr_mm_T time"))
+        print(f"Host time: {host_ms:.4f} ms, Device time: {device_ms:.4f} ms, Launch time: {launch_ms:.4f} ms")
+        
+        # 3. both (consequtive sequential launches)
+        for _ in range(warmup_iters):
+            out_bvr, scales = _sbvr_input_transfrom(proj_input, nRTN=self.rtn_bits, group_size=128)
+            out = _rtn_sbvr_1xtN_mm_T(
+                l_bvr = out_bvr,
+                l_scales = scales,
+                r_bvr = self.weight_sbvr.bvr,
+                r_coeff_idx = self.weight_sbvr.coeff_idx,
+                r_coeff_cache = self.weight_sbvr.coeff_cache,
+                bias = self.rtn_sbvr_bias,
+                nRTN = self.rtn_bits
+            )
+        torch.cuda.synchronize()
+        
+        start_evt = torch.cuda.Event(enable_timing=True)
+        end_evt   = torch.cuda.Event(enable_timing=True)
+        start_host = time.perf_counter()
+        start_evt.record()
+        for _ in range(measure_iters):
+            out_bvr, scales = _sbvr_input_transfrom(proj_input, nRTN=self.rtn_bits, group_size=128)
+            out = _rtn_sbvr_1xtN_mm_T(
+                l_bvr = out_bvr,
+                l_scales = scales,
+                r_bvr = self.weight_sbvr.bvr,
+                r_coeff_idx = self.weight_sbvr.coeff_idx,
+                r_coeff_cache = self.weight_sbvr.coeff_cache,
+                bias = self.rtn_sbvr_bias,
+                nRTN = self.rtn_bits
+            )
+        end_evt.record()
+        torch.cuda.synchronize()
+        host_ms = (time.perf_counter() - start_host) * 1000 / measure_iters
+        device_ms = start_evt.elapsed_time(end_evt) / measure_iters
+        launch_ms = device_ms - host_ms
+        
+        print(b_str(f"e2e time"))
+        print(f"Host time: {host_ms:.4f} ms, Device time: {device_ms:.4f} ms, Launch time: {launch_ms:.4f} ms")
+        
+        # 4. torch fp16 matmul
+        self.weight_sbvr.restored_w = self.weight_sbvr.decode()
+        for _ in range(warmup_iters):
+            out = proj_input @ self.weight_sbvr.restored_w.T
+        torch.cuda.synchronize()
+        
+        start_evt = torch.cuda.Event(enable_timing=True)
+        end_evt   = torch.cuda.Event(enable_timing=True)
+        start_host = time.perf_counter()
+        start_evt.record()
+        for _ in range(measure_iters):
+            out = proj_input @ self.weight_sbvr.restored_w.T
+        end_evt.record()
+        torch.cuda.synchronize()
+        host_ms = (time.perf_counter() - start_host) * 1000 / measure_iters
+        device_ms = start_evt.elapsed_time(end_evt) / measure_iters
+        launch_ms = device_ms - host_ms
+        
+        print(b_str(f"torch fp16 matmul time"))
+        print(f"Host time: {host_ms:.4f} ms, Device time: {device_ms:.4f} ms, Launch time: {launch_ms:.4f} ms")
+        
+    
 if __name__ == "__main__":
     MODEL_NAME = "meta-llama/Llama-3.2-1B"
     W_BITS = 4
@@ -262,12 +395,17 @@ if __name__ == "__main__":
         rtn_worker = PseudoRTN(MODEL_NAME, W_BITS, device, rtn_bits=7)
         rtn_worker.test_rtn_sbvr_mm_T(layer_idx=0, module_name="q_proj")
         
+    def rtn_sbvr_ablation_test():
+        rtn_worker = PseudoRTN(MODEL_NAME, W_BITS, device, rtn_bits=7)
+        rtn_worker.test_rtn_sbvr_ablation(layer_idx=0, module_name="q_proj")
+        
         
     # randn_test()
     # proj_test(layer_idx=0, module_name="q_proj")
     # all_layers_test()
     # sbvr_input_transform_test()
-    rtn_sbvr_mm_T_test()
+    # rtn_sbvr_mm_T_test()
+    rtn_sbvr_ablation_test()
     
     
    
