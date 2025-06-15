@@ -37,6 +37,17 @@ void launch_fused_rtn_lut_bvr(
     int num_groups = 128,
     int nRTN = 6);
 
+// Declare the kernel launcher for RTN-SBVR 1xN mm_T (templated in the actual .cu file)
+void launch_rtn_sbvr_1xtN_mm_T(
+    uint32_t* l_bvr, float* l_scales,
+    uint32_t* r_bvr, void* r_coeff_idx, __half* r_coeff_cache,
+    int r_num_sums,
+    int r_cache_size,
+    int nRTN,
+    __half* bias, __half* out,
+    int N, int K,
+    int device_id = 0);
+
 int device_count;
 cudaDeviceProp cuda_prop_list[16];
 
@@ -154,6 +165,41 @@ std::tuple<torch::Tensor, torch::Tensor> sbvr_input_transfrom(
     return std::make_tuple(out_bvr, scales);
 }
 
+// PyTorch wrapper for RTN-SBVR 1xN mm_T
+torch::Tensor rtn_sbvr_1xtN_mm_T(
+    torch::Tensor l_bvr,
+    torch::Tensor l_scales,
+    torch::Tensor r_bvr,
+    torch::Tensor r_coeff_idx,
+    torch::Tensor r_coeff_cache,
+    torch::Tensor bias,
+    int nRTN = 7)
+{
+    const int N = r_bvr.size(1);
+    const int K = l_bvr.size(0);
+    const int r_num_sums = r_bvr.size(2);
+    const int r_cache_size = r_coeff_cache.size(0);
+    assert (l_bvr.size(0) == r_bvr.size(0));
+
+    // Recommendation: do not use bias for RTN-SBVR
+    __half* bias_ptr = nullptr;
+    if (bias.size(0) == N)
+        bias_ptr = reinterpret_cast<__half*>(bias.data_ptr<at::Half>());
+    
+    auto out = torch::empty({1, N}, torch::dtype(torch::kFloat16).device(l_bvr.device()));
+
+    launch_rtn_sbvr_1xtN_mm_T(
+        l_bvr.data_ptr<uint32_t>(), l_scales.data_ptr<float>(),
+        r_bvr.data_ptr<uint32_t>(), r_coeff_idx.data_ptr(), 
+        reinterpret_cast<__half*>(r_coeff_cache.data_ptr<at::Half>()),
+        r_num_sums, r_cache_size, nRTN,
+        bias_ptr,
+        reinterpret_cast<__half*>(out.data_ptr<at::Half>()),
+        N, K);
+
+    return out;
+}
+
 void sbvr_cuda_init() 
 {
     cudaError_t err = cudaGetDeviceCount(&device_count);
@@ -209,4 +255,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("nRTN") = 6,
           py::arg("group_size") = 128,
           "SBVR Input Transform kernel");
+    m.def("_rtn_sbvr_1xtN_mm_T", &rtn_sbvr_1xtN_mm_T,
+          py::arg("l_bvr"),
+          py::arg("l_scales"),
+          py::arg("r_bvr"),
+          py::arg("r_coeff_idx"),
+          py::arg("r_coeff_cache"),
+          py::arg("bias"),
+          py::arg("nRTN") = 7,
+          "RTN-SBVR 1xN Matrix-Matrix_Transposed Multiplication kernel");
 }
