@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <cfloat>
 
+// #include "rtn_constants.cuh"
+
 #define GROUP_SIZE 128
 
 #define BLOCK_PER_SM 16
@@ -98,14 +100,29 @@ struct coeffs {
     __half2 coeff[NUM_SUMS / 2];
 };
 
+extern int device_count;
+extern cudaDeviceProp cuda_prop_list[16];
+
+/* helper so the table stays readable */
+static constexpr __half h(u_int16_t bits) noexcept
+{
+    return __half{ __half_raw{ bits } };
+}
+
+__device__ __constant__ __half RTN_7_PIVOT[8] = {
+    h(0x3C00),   //  +1.0
+    h(0x4000),   //  +2.0
+    h(0x4400),   //  +4.0
+    h(0x4800),   //  +8.0
+    h(0x4C00),   // +16.0
+    h(0x5000),   // +32.0
+    h(0x5400),   // +64.0
+    h(0xD3E0)    // −63.0
+};
+
 /*****************************************************************************
  *  RTN-SBVR GEMM kernel
  *****************************************************************************/
-__constant__ __half RTN_7_PIVOT[8] = {
-    __float2half( 1.0f),  __float2half( 2.0f),  __float2half( 4.0f),
-    __float2half( 8.0f),  __float2half(16.0f),  __float2half(32.0f),
-    __float2half(64.0f),  __float2half(-63.0f)
-};
 
 template <typename RIndexT, int RNumSums, int TileN>
 __global__ void rtn_7_sbvr_1xtN_mm_T(
@@ -114,6 +131,18 @@ __global__ void rtn_7_sbvr_1xtN_mm_T(
     __half* __restrict__ bias, __half* __restrict__ out,
     int N, int K)
 {
+    // /* --------------------------------- DEBUG PRINT */
+    // if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0)        // only one thread prints
+    // {
+    //     printf("---- RTN_7_PIVOT ----\n");
+    //     #pragma unroll
+    //     for (int i = 0; i < 8; ++i)
+    //         printf("  [%d] = %f\n", i, __half2float(RTN_7_PIVOT[i]));
+    //     printf("---------------------\n");
+    // }
+    // __syncthreads();            // optional, keeps all threads aligned here
+    // return;                     // early-out so kernel does *nothing* else
+
     constexpr int LNumSums = 8;
 
     const int tblock_per_N = (N + TileN - 1) / TileN;
@@ -233,7 +262,7 @@ void launch_rtn_sbvr_1xtN_mm_T_kernel_wrapper(
             N, K);
     }
     else {
-        throw std::runtime_error("Not implemented nRTN values")
+        throw std::runtime_error("Not implemented nRTN values");
     }
 
     cudaError_t err = cudaGetLastError();

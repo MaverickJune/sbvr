@@ -442,11 +442,17 @@ def input_sbvr_mm_T(input_bvr, input_coeff_idx, input_coeff_set,
     return _sbvr_mm_T(input_bvr, input_coeff_idx, input_coeff_set,
                 w_sbvr.bvr, w_sbvr.coeff_idx, w_sbvr.coeff_cache, bias)
     
-def load(filename, device=None, verbose_level=1) -> sbvr:
+def load(filename, device=None, verbose_level=1, apply_dtype_conv=False, target_dtype=None) -> sbvr:
     serialized_sbvr = torch.load(filename)
     sbvr_obj = sbvr(serialized=serialized_sbvr, 
                     verbose_level=verbose_level, device=device)
     sbvr_obj.verbose_level = verbose_level
+    if apply_dtype_conv:
+        if target_dtype is None:
+            raise ValueError(r_str("target_dtype must be provided when apply_dtype_conv is True"))
+        sbvr_obj.original_dtype = target_dtype
+        sbvr_obj = sbvr_obj.to(target_dtype)
+    
     if verbose_level > 0:
         print(b_str("Loaded SBVR object from: ") + filename)
         print(sbvr_obj.get_sbvr_info())

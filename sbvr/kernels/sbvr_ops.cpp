@@ -6,6 +6,8 @@
 #include <assert.h>
 #include <tuple>
 
+// #include "rtn_constants.cuh"
+
 // Declare the kernel launcher (templated in the actual .cu file)
 void launch_cuda_sbvr_mm_T(
     uint32_t* l_bvr, void* l_coeff_idx, __half* l_coeff_cache,
@@ -151,7 +153,7 @@ std::tuple<torch::Tensor, torch::Tensor> sbvr_input_transfrom(
     const int c_ratio = 32 / _nRTN;
     const int num_groups = K / group_size;
 
-    auto out_bvr = torch::empty({K / c_ratio}, torch::dtype(torch::kUInt32).device(x.device()));
+    auto out_bvr = torch::empty({K / 32, _nRTN}, torch::dtype(torch::kUInt32).device(x.device()));
     auto scales = torch::empty({K / group_size}, torch::dtype(torch::kFloat32).device(x.device()));
 
     launch_fused_rtn_lut_bvr(
@@ -179,7 +181,18 @@ torch::Tensor rtn_sbvr_1xtN_mm_T(
     const int K = l_bvr.size(0);
     const int r_num_sums = r_bvr.size(2);
     const int r_cache_size = r_coeff_cache.size(0);
-    assert (l_bvr.size(0) == r_bvr.size(0));
+    const int _nRTN = nRTN + 1;
+
+    //printf("l_bvr.size(0): %d, r_bvr.size(0): %d\n", l_bvr.size(0), r_bvr.size(0));
+    // halt the program
+    // assert(false);
+
+    // assert (l_bvr.size(0) == r_bvr.size(0));
+    if (l_bvr.size(0) != r_bvr.size(0))
+        throw std::runtime_error("l_bvr.size(0) != r_bvr.size(0)");
+
+    if (l_bvr.size(1) != _nRTN)
+        throw std::runtime_error("l_bvr.size(1) != _nRTN");
 
     // Recommendation: do not use bias for RTN-SBVR
     __half* bias_ptr = nullptr;
@@ -229,6 +242,15 @@ void sbvr_cuda_init()
     std::cout << "\033[92mSBVR Init:\033[0m" 
               << " CUDA Initialization complete." << std::endl;
 }
+
+// void load_constants()
+// {
+//     std::cout << "Loaded constants for the SBVR CUDA kernels" << std::endl;
+//     cudaMemcpyToSymbol(RTN_7_PIVOT,
+//                        h_RTN_7_PIVOT,
+//                        sizeof(h_RTN_7_PIVOT),
+//                        0, cudaMemcpyHostToDevice);
+// }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("_sbvr_cuda_init", &sbvr_cuda_init,
