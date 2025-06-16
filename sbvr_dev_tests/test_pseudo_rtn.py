@@ -252,6 +252,32 @@ class PseudoRTN:
         proj_input = self._get_module_sample_from_raw_input(input_data, module_name, n_samples=1, dtype=torch.float16)
         
         # warm up -> measurement patterns
+        # 0. torch fp16 matmul
+        self.weight_sbvr.restored_w = self.weight_sbvr.decode()
+        for _ in range(warmup_iters):
+            out = proj_input @ self.weight_sbvr.restored_w.T
+        torch.cuda.synchronize()
+        
+        # print(f"restored_w type: {self.weight_sbvr.restored_w.dtype}")
+        # print(f"proj_input type: {proj_input.dtype}")
+        # print(f"restored_w shape: {self.weight_sbvr.restored_w.shape}, proj_input shape: {proj_input.shape}")
+        # sys.exit(0)
+        
+        start_evt = torch.cuda.Event(enable_timing=True)
+        end_evt   = torch.cuda.Event(enable_timing=True)
+        start_host = time.perf_counter()
+        start_evt.record()
+        for _ in range(measure_iters):
+            out = proj_input @ self.weight_sbvr.restored_w.T
+        end_evt.record()
+        torch.cuda.synchronize()
+        host_ms = (time.perf_counter() - start_host) * 1000 / measure_iters
+        device_ms = start_evt.elapsed_time(end_evt) / measure_iters
+        launch_ms = host_ms - device_ms
+        
+        print(b_str(f"torch fp16 matmul time"))
+        print(f"Host time: {host_ms:.4f} ms, Device time: {device_ms:.4f} ms, Launch time: {launch_ms:.4f} ms")
+        
         # 1. input transform
         for _ in range(warmup_iters):
             out_bvr, scales = _sbvr_input_transfrom(proj_input, nRTN=self.rtn_bits, group_size=128)
@@ -267,7 +293,7 @@ class PseudoRTN:
         torch.cuda.synchronize()
         host_ms = (time.perf_counter() - start_host) * 1000 / measure_iters
         device_ms = start_evt.elapsed_time(end_evt) / measure_iters
-        launch_ms = device_ms - host_ms
+        launch_ms = host_ms - device_ms
         
         print(b_str(f"input_transform time"))
         print(f"Host time: {host_ms:.4f} ms, Device time: {device_ms:.4f} ms, Launch time: {launch_ms:.4f} ms")
@@ -303,7 +329,7 @@ class PseudoRTN:
         torch.cuda.synchronize()
         host_ms = (time.perf_counter() - start_host) * 1000 / measure_iters
         device_ms = start_evt.elapsed_time(end_evt) / measure_iters
-        launch_ms = device_ms - host_ms
+        launch_ms = host_ms - device_ms
         
         print(b_str(f"rtn_sbvr_mm_T time"))
         print(f"Host time: {host_ms:.4f} ms, Device time: {device_ms:.4f} ms, Launch time: {launch_ms:.4f} ms")
@@ -341,30 +367,9 @@ class PseudoRTN:
         torch.cuda.synchronize()
         host_ms = (time.perf_counter() - start_host) * 1000 / measure_iters
         device_ms = start_evt.elapsed_time(end_evt) / measure_iters
-        launch_ms = device_ms - host_ms
+        launch_ms = host_ms - device_ms
         
         print(b_str(f"e2e time"))
-        print(f"Host time: {host_ms:.4f} ms, Device time: {device_ms:.4f} ms, Launch time: {launch_ms:.4f} ms")
-        
-        # 4. torch fp16 matmul
-        self.weight_sbvr.restored_w = self.weight_sbvr.decode()
-        for _ in range(warmup_iters):
-            out = proj_input @ self.weight_sbvr.restored_w.T
-        torch.cuda.synchronize()
-        
-        start_evt = torch.cuda.Event(enable_timing=True)
-        end_evt   = torch.cuda.Event(enable_timing=True)
-        start_host = time.perf_counter()
-        start_evt.record()
-        for _ in range(measure_iters):
-            out = proj_input @ self.weight_sbvr.restored_w.T
-        end_evt.record()
-        torch.cuda.synchronize()
-        host_ms = (time.perf_counter() - start_host) * 1000 / measure_iters
-        device_ms = start_evt.elapsed_time(end_evt) / measure_iters
-        launch_ms = device_ms - host_ms
-        
-        print(b_str(f"torch fp16 matmul time"))
         print(f"Host time: {host_ms:.4f} ms, Device time: {device_ms:.4f} ms, Launch time: {launch_ms:.4f} ms")
         
     
