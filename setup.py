@@ -20,8 +20,9 @@ setup(
             sources=[
                 'sbvr/kernels/sbvr_ops.cpp', 
                 'sbvr/kernels/sbvr_kernel.cu',
-                'sbvr/kernels/input_kernel.cu',
-                'sbvr/kernels/rtn_sbvr_kernel.cu'
+                # 'sbvr/kernels/input_kernel.cu',
+                'sbvr/kernels/rtn_sbvr_kernel.cu',
+                # 'sbvr/kernels/fused_rtn_sbvr_kernel.cu'
             ],
             include_dirs=[
                 cutlass_dir,
@@ -33,9 +34,14 @@ setup(
                     '-O3',
                     '--use_fast_math',
                     '--ftz=true',
-                    '-Xptxas=-v', 
+                    '-Xptxas=-v',
+                    # '-rdc=true',
+                    # '-G',
+                    # '-g', 
+                    # '-lineinfo',
                 ],
             },
+            extra_link_args=['-lcudadevrt'],  # device runtime
         ),
     ],
     cmdclass={'build_ext': BuildExtension},

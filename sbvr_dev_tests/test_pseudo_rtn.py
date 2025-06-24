@@ -2,7 +2,7 @@ import torch
 import os
 import sys
 from sbvr_e2e_utils.utils import r_str, y_str, b_str, g_str, get_errors, print_errors
-from sbvr import _sbvr_input_transfrom, _rtn_sbvr_1xtN_mm_T
+from sbvr import _sbvr_input_transfrom, _rtn_sbvr_1xtN_mm_T, _fused_rtn_sbvr_1xtN_mm_T
 from sbvr import load as sbvr_load
 from utils.utils import cleanup_memory
 from tqdm import tqdm
@@ -243,7 +243,7 @@ class PseudoRTN:
         print_errors(out_emulated, out)
         
     def test_rtn_sbvr_ablation(self, layer_idx, module_name,
-                               warmup_iters=50, measure_iters=1000):
+                               warmup_iters=50, measure_iters=1):
         if self.weight_sbvr is None:
             self._set_weight_sbvr(layer_idx, module_name)
         
@@ -255,7 +255,7 @@ class PseudoRTN:
         # 0. torch fp16 matmul
         self.weight_sbvr.restored_w = self.weight_sbvr.decode()
         for _ in range(warmup_iters):
-            out = proj_input @ self.weight_sbvr.restored_w.T
+            out_torch = proj_input @ self.weight_sbvr.restored_w.T
         torch.cuda.synchronize()
         
         # print(f"restored_w type: {self.weight_sbvr.restored_w.dtype}")
@@ -268,7 +268,7 @@ class PseudoRTN:
         start_host = time.perf_counter()
         start_evt.record()
         for _ in range(measure_iters):
-            out = proj_input @ self.weight_sbvr.restored_w.T
+            out_torch = proj_input @ self.weight_sbvr.restored_w.T
         end_evt.record()
         torch.cuda.synchronize()
         host_ms = (time.perf_counter() - start_host) * 1000 / measure_iters
@@ -354,7 +354,7 @@ class PseudoRTN:
         start_evt.record()
         for _ in range(measure_iters):
             out_bvr, scales = _sbvr_input_transfrom(proj_input, nRTN=self.rtn_bits, group_size=128)
-            out = _rtn_sbvr_1xtN_mm_T(
+            out_q = _rtn_sbvr_1xtN_mm_T(
                 l_bvr = out_bvr,
                 l_scales = scales,
                 r_bvr = self.weight_sbvr.bvr,
@@ -371,6 +371,47 @@ class PseudoRTN:
         
         print(b_str(f"e2e time"))
         print(f"Host time: {host_ms:.4f} ms, Device time: {device_ms:.4f} ms, Launch time: {launch_ms:.4f} ms")
+
+        for _ in range(warmup_iters):
+            out_fused = _fused_rtn_sbvr_1xtN_mm_T(
+                x              = proj_input,                  # 1×K float16
+                r_bvr          = self.weight_sbvr.bvr,
+                r_coeff_idx    = self.weight_sbvr.coeff_idx,
+                r_coeff_cache  = self.weight_sbvr.coeff_cache,
+                bias           = self.rtn_sbvr_bias,
+                nRTN           = self.rtn_bits
+            )
+        torch.cuda.synchronize()
+
+        start_evt = torch.cuda.Event(enable_timing=True)
+        end_evt   = torch.cuda.Event(enable_timing=True)
+        start_host = time.perf_counter()
+
+        start_evt.record()
+        for _ in range(measure_iters):
+            out_fused = _fused_rtn_sbvr_1xtN_mm_T(
+                x              = proj_input,
+                r_bvr          = self.weight_sbvr.bvr,
+                r_coeff_idx    = self.weight_sbvr.coeff_idx,
+                r_coeff_cache  = self.weight_sbvr.coeff_cache,
+                bias           = self.rtn_sbvr_bias,
+                nRTN           = self.rtn_bits
+            )
+        end_evt.record()
+        torch.cuda.synchronize()
+
+        host_ms   = (time.perf_counter() - start_host) * 1000 / measure_iters
+        device_ms = start_evt.elapsed_time(end_evt) / measure_iters
+        launch_ms = host_ms - device_ms
+
+        print(b_str("fused_rtn_sbvr_1xtN_mm_T time"))
+        print(f"Host time: {host_ms:.4f} ms, "
+            f"Device time: {device_ms:.4f} ms, "
+            f"Launch time: {launch_ms:.4f} ms")
+
+
+
+        print_errors(out_torch, out_fused)
         
     
 if __name__ == "__main__":
@@ -402,7 +443,7 @@ if __name__ == "__main__":
         
     def rtn_sbvr_ablation_test():
         rtn_worker = PseudoRTN(MODEL_NAME, W_BITS, device, rtn_bits=7)
-        rtn_worker.test_rtn_sbvr_ablation(layer_idx=0, module_name="q_proj")
+        rtn_worker.test_rtn_sbvr_ablation(layer_idx=0, module_name="down_proj")
         
         
     # randn_test()

@@ -50,6 +50,18 @@ void launch_rtn_sbvr_1xtN_mm_T(
     int N, int K,
     int device_id = 0);
 
+void launch_fused_rtn_sbvr_1xtN_mm_T(
+    __half* x,
+    uint32_t* r_bvr, void* r_coeff_idx, __half* r_coeff_cache,
+    int r_num_sums,
+    int r_cache_size,
+    int nRTN,
+    __half* bias, __half* out,
+    int N, int K,
+    int device_id = 0);
+
+void launch_cudaGetSymbolAddress_wrapper();
+
 int device_count;
 cudaDeviceProp cuda_prop_list[16];
 
@@ -213,6 +225,47 @@ torch::Tensor rtn_sbvr_1xtN_mm_T(
     return out;
 }
 
+
+torch::Tensor fused_rtn_sbvr_1xtN_mm_T(
+    torch::Tensor x,
+    torch::Tensor r_bvr,
+    torch::Tensor r_coeff_idx,
+    torch::Tensor r_coeff_cache,
+    torch::Tensor bias,
+    int nRTN = 7)
+{
+    const int N = r_bvr.size(1);
+    const int K = x.size(1);
+    const int r_num_sums = r_bvr.size(2);
+    const int r_cache_size = r_coeff_cache.size(0);
+    const int _nRTN = nRTN + 1;
+
+    //printf("l_bvr.size(0): %d, r_bvr.size(0): %d\n", l_bvr.size(0), r_bvr.size(0));
+    // halt the program
+    // assert(false);
+
+    // Recommendation: do not use bias for RTN-SBVR
+    __half* bias_ptr = nullptr;
+    if (bias.size(0) == N)
+        bias_ptr = reinterpret_cast<__half*>(bias.data_ptr<at::Half>());
+    
+    auto out = torch::empty({1, N}, torch::dtype(torch::kFloat16).device(x.device()));
+
+
+    launch_fused_rtn_sbvr_1xtN_mm_T(
+        reinterpret_cast<__half*>(x.data_ptr<at::Half>()),
+        r_bvr.data_ptr<uint32_t>(), r_coeff_idx.data_ptr(), 
+        reinterpret_cast<__half*>(r_coeff_cache.data_ptr<at::Half>()),
+        r_num_sums, r_cache_size, nRTN,
+        bias_ptr,
+        reinterpret_cast<__half*>(out.data_ptr<at::Half>()),
+        N, K);
+
+    return out;
+}
+
+
+
 void sbvr_cuda_init() 
 {
     cudaError_t err = cudaGetDeviceCount(&device_count);
@@ -241,6 +294,8 @@ void sbvr_cuda_init()
     }
     std::cout << "\033[92mSBVR Init:\033[0m" 
               << " CUDA Initialization complete." << std::endl;
+
+    launch_cudaGetSymbolAddress_wrapper();
 }
 
 // void load_constants()
@@ -286,4 +341,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("bias"),
           py::arg("nRTN") = 7,
           "RTN-SBVR 1xN Matrix-Matrix_Transposed Multiplication kernel");
-}
+    m.def("_fused_rtn_sbvr_1xtN_mm_T", &fused_rtn_sbvr_1xtN_mm_T,
+          py::arg("x"),
+          py::arg("r_bvr"),
+          py::arg("r_coeff_idx"),
+          py::arg("r_coeff_cache"),
+          py::arg("bias"),
+          py::arg("nRTN") = 7,
+          "Fused RTN-SBVR 1xN Matrix-Matrix_Transposed Multiplication kernel");
+    }
+            
