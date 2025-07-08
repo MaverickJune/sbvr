@@ -94,22 +94,24 @@ def main():
         add_bos_token=False,
     )
 
-    layer_idx = 4  # 원하는 레이어 인덱스
-    target_layer = model.model.layers[layer_idx]
+    for layer_idx in range(6, 7):
+        target_layer = model.model.layers[layer_idx]
 
-    # 예시: Attention의 q_proj
-    mlp_module = target_layer.mlp
-    sbvr_module = target_layer.mlp.down_proj
-    hidden_dim = mlp_module.hidden_size
+        mlp_module = target_layer.mlp
+        sbvr_module = target_layer.mlp.down_proj
+        hidden_dim = mlp_module.hidden_size * 4
+        print(f"hidden_dim: {hidden_dim}")
 
-    # seq_len=1, batch_size=1
-    dummy_x = torch.randn(1, 1, hidden_dim, device="cuda:0", dtype=torch.float16)
-    dummy_x_flat = dummy_x.view(1, -1)  # (seq_len, hidden_dim) = (1, hidden_dim)
+        dummy_x = torch.randn(1, 1, hidden_dim, device="cuda:0", dtype=torch.float16)
+        dummy_x_flat = dummy_x.view(1, -1)  # (seq_len, hidden_dim) = (1, hidden_dim)
 
-    # d_forward는 내부에서 _sbvr_input_transfrom을 사용하므로, 입력 shape는 (1, hidden_dim) 권장
-    with torch.no_grad():
-        out = sbvr_module.d_forward(dummy_x_flat)
-    print(f"output shape: {out.shape}")
+        try:
+            with torch.no_grad():
+                out = sbvr_module.d_forward(dummy_x_flat)
+            print(f"Layer {layer_idx} output shape: {out.shape}")
+        except Exception as e:
+            print(f"[Layer {layer_idx}] Error: {e}")
+            continue
         
     if args.measure_ppl:
         ppl = evaluate_ppl(

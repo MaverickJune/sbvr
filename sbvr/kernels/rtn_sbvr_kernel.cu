@@ -352,7 +352,7 @@ void launch_rtn_sbvr_1xtN_mm_T(
     int N, int K,
     int device_id = 0)
 {
-    const bool use_r_uint8 = (r_cache_size <= 256);
+    const bool use_r_uint8 = (r_cache_size < 256);
     
     if (use_r_uint8) {
         switch (r_num_sums) {
@@ -424,11 +424,6 @@ void launch_fused_rtn_7_sbvr_1xtN_mm_T_kernel_wrapper(
 
     // launch the kernels in sequential manner
     fused_rtn7_lut_bvr<<<grid_rtn_input, block_rtn_input>>>(x, d_bvr_ptr, d_scales_ptr, num_groups);
-    std::cout << "RIndexT: " << typeid(RIndexT).name() << ", RNumSums: " << RNumSums << std::endl;
-    std::cout << "Launching kernel with:\n";
-std::cout << "  N = " << N << ", K/32 = " << (K / 32) << std::endl;
-std::cout << "  r_bvr ptr: " << r_bvr << ", r_coeff_idx: " << r_coeff_idx
-          << ", r_coeff_cache: " << r_coeff_cache << ", out: " << out << std::endl;
 
 
     rtn_7_sbvr_1xtN_mm_T<RIndexT, RNumSums, _1xtN_tN><<<blocks_mm_T, threads_mm_T>>>(
@@ -456,7 +451,7 @@ void launch_fused_rtn_sbvr_1xtN_mm_T(
     int device_id = 0)
 {
 
-    const bool use_r_uint8 = (r_cache_size < 256);
+    const bool use_r_uint8 = (r_cache_size <= 256);
 
     if (use_r_uint8 && nRTN == 7) {
         if (r_num_sums == 4) {

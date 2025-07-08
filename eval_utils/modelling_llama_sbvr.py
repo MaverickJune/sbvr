@@ -387,10 +387,7 @@ class LlamaSbvrMLP(nn.Module):
                 x = self.act_fn(self.gate_proj.d_forward(out_bvr=out_bvr, scales=scales)) * self.up_proj.d_forward(out_bvr=out_bvr, scales=scales)
                 had_K, K = hadamard_utils.get_hadK(self.intermediate_size)
                 x = hadamard_utils.matmul_hadU_cuda(x, had_K, K)
-                print(f"[Layer {self.layer_idx:2d}] BEFORE d_forward")
                 x = self.down_proj.d_forward(x)
-                torch.cuda.synchronize()
-                print(f"[Layer {self.layer_idx:2d}] AFTER d_forward")
             # reshape the output
             x = x.view(bsz, seq_len, -1)
             
