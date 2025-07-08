@@ -407,6 +407,39 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
+
+class SbvrGemvModule(nn.Module):
+    """
+    Wrap an existing SBVR projection (q_proj, k_proj, v_proj) that already
+    has had .load_sbvr_weights(...) and .preprocess_model() called on it.
+    """
+    def __init__(self,
+                 q_proj: nn.Module,
+                 k_proj: nn.Module,
+                 v_proj: nn.Module,
+                 rtn_bits: int,
+                 rtn_group_size: int):
+        super().__init__()
+        self.q_proj = q_proj
+        self.k_proj = k_proj
+        self.v_proj = v_proj
+        self.rtn_bits = rtn_bits
+        self.rtn_group_size = rtn_group_size
+
+    def forward(self, hidden_states: torch.Tensor):
+        # hidden_states: shape (q_len, hidden_size)
+        out_bvr, scales = _sbvr_input_transfrom(
+            hidden_states,
+            nRTN=self.rtn_bits,
+            group_size=self.rtn_group_size
+        )
+        q = self.q_proj.d_forward(out_bvr=out_bvr, scales=scales)
+        k = self.k_proj.d_forward(out_bvr=out_bvr, scales=scales)
+        v = self.v_proj.d_forward(out_bvr=out_bvr, scales=scales)
+        # concatenate along the last dim (hidden_size → 3*hidden_size)
+        return torch.cat([q, k, v], dim=-1)
+
+
 class LlamaSbvrAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 

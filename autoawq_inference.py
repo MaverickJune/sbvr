@@ -26,7 +26,7 @@ def torch_backend():
         # --- Setup ---
     device = get_best_device()  # choose CUDA if available
     model_id = "meta-llama/Llama-3.2-1B"
-    # model_id = "meta-llama/Llama-3.1-8B"  # Example for Llama-3.1-8B
+    #model_id = "meta-llama/Llama-3.1-8B"  # Example for Llama-3.1-8B
 
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
@@ -50,44 +50,49 @@ def torch_backend():
     for _ in range(5):
         with torch.inference_mode():
             _ = model.generate(**inputs, max_new_tokens=1, do_sample=False)
-            torch.cuda.synchronize()
+            if device.startswith == "cuda":
+                torch.cuda.synchronize()
 
     # --- 3) Measure TTFT (time to first token) ---
-    # ttft_runs = 10
-    # ttft_latencies = []
-    # for _ in range(ttft_runs):
-    #     with torch.inference_mode():
-    #         torch.cuda.synchronize()
-    #         t0 = time.time()
-    #         _ = model.generate(**inputs, max_new_tokens=1, do_sample=False)
-    #         torch.cuda.synchronize()
-    #         t1 = time.time()
-    #     ttft_latencies.append(t1 - t0)
-    # avg_ttft_ms = (sum(ttft_latencies) / len(ttft_latencies)) * 1000
+    ttft_runs = 10
+    ttft_latencies = []
+    for _ in range(ttft_runs):
+        with torch.inference_mode():
+            if device.startswith == "cuda":
+                torch.cuda.synchronize()
+            t0 = time.time()
+            _ = model.generate(**inputs, max_new_tokens=1, do_sample=False)
+            if device.startswith == "cuda":
+                torch.cuda.synchronize()
+            t1 = time.time()
+        ttft_latencies.append(t1 - t0)
+    avg_ttft_ms = (sum(ttft_latencies) / len(ttft_latencies)) * 1000
 
     # --- 4) Measure end-to-end latency for 20 tokens ---
-    full_runs = 20
+    full_runs = 10
     full_latencies = []
     for _ in range(full_runs):
         with torch.inference_mode():
-            torch.cuda.synchronize()
+            if device.startswith == "cuda":
+                torch.cuda.synchronize()
             t0 = time.time()
             outputs = model.generate(**inputs, max_new_tokens=20, do_sample=False)
-            torch.cuda.synchronize()
+            if device.startswith == "cuda":
+                torch.cuda.synchronize()
             t1 = time.time()
         full_latencies.append(t1 - t0)
     avg_full_ms = (sum(full_latencies) / len(full_latencies)) * 1000
 
     # --- 5) Compute TBT (avg time per additional token) ---
     # 19 additional tokens after the first
-    # avg_tbt_ms = (avg_full_ms - avg_ttft_ms) / (20 - 1)
+    avg_tbt_ms = (avg_full_ms - avg_ttft_ms) / (20 - 1)
 
     # --- 6) Decode and print all results ---
     decoded = tokenizer.decode(outputs[0], skip_special_tokens=True)
     print(f"\n[prompt]   {prompt}")
     print(f"[response] {decoded}")
-    # print(f"[TTFT]     {avg_ttft_ms:.2f} ms (to first token)")
-    # print(f"[TBT]      {avg_tbt_ms:.2f} ms (per additional token)")
+    print(f"[TTFT]     {avg_ttft_ms:.2f} ms (to first token)")
+    print(f"[TBT]      {avg_tbt_ms:.2f} ms (per additional token)")
     print(f"[latency]  {avg_full_ms:.2f} ms (20-token end-to-end)")
 
 def autoawq_backend():
@@ -97,7 +102,7 @@ def autoawq_backend():
     print(f"Using device: {device}")
 
     quant_path = "Llama-3.2-1B-AWQ-gemv"
-    # quant_path = "Llama-3.1-8B-AWQ-gemm"  # Example for Llama-3.1-8B
+    #quant_path = "Llama-3.1-8B-AWQ-gemv"  # Example for Llama-3.1-8B
 
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(quant_path, trust_remote_code=True)
@@ -124,51 +129,55 @@ def autoawq_backend():
     for _ in range(5):
         with torch.inference_mode():
             _ = model.generate(**inputs, max_new_tokens=1, do_sample=False)
-            torch.cuda.synchronize()
+            if device.startswith == "cuda":
+                torch.cuda.synchronize()
 
     # --- 3) Measure TTFT (time to first token) ---
-    # ttft_runs = 10
-    # ttft_latencies = []
-    # for _ in range(ttft_runs):
-    #     with torch.inference_mode():
-    #         torch.cuda.synchronize()
-    #         t0 = time.time()
-    #         _ = model.generate(**inputs, max_new_tokens=1, do_sample=False)
-    #         torch.cuda.synchronize()
-    #         t1 = time.time()
-    #     ttft_latencies.append(t1 - t0)
-    # avg_ttft_ms = (sum(ttft_latencies) / len(ttft_latencies)) * 1000
+    ttft_runs = 10
+    ttft_latencies = []
+    for _ in range(ttft_runs):
+        with torch.inference_mode():
+            if device.startswith == "cuda":
+                torch.cuda.synchronize()
+            t0 = time.time()
+            _ = model.generate(**inputs, max_new_tokens=1, do_sample=False)
+            if device.startswith == "cuda":
+                torch.cuda.synchronize()
+            t1 = time.time()
+        ttft_latencies.append(t1 - t0)
+    avg_ttft_ms = (sum(ttft_latencies) / len(ttft_latencies)) * 1000
 
     # --- 4) Measure end-to-end latency for 20 tokens ---
-    full_runs = 20
+    full_runs = 10
     full_latencies = []
     for _ in range(full_runs):
         with torch.inference_mode():
-            torch.cuda.synchronize()
+            if device.startswith == "cuda":
+                torch.cuda.synchronize()
             t0 = time.time()
             outputs = model.generate(**inputs, max_new_tokens=20, do_sample=False)
-            torch.cuda.synchronize()
+            if device.startswith == "cuda":
+                torch.cuda.synchronize()
             t1 = time.time()
         full_latencies.append(t1 - t0)
     avg_full_ms = (sum(full_latencies) / len(full_latencies)) * 1000
 
     # --- 5) Compute TBT (avg time per additional token) ---
     # 19 additional tokens after the first
-    # avg_tbt_ms = (avg_full_ms - avg_ttft_ms) / (20 - 1)
+    avg_tbt_ms = (avg_full_ms - avg_ttft_ms) / (20 - 1)
 
     # --- 6) Decode and print all results ---
     decoded = tokenizer.decode(outputs[0], skip_special_tokens=True)
     print(f"\n[prompt]   {prompt}")
     print(f"[response] {decoded}")
-    # print(f"[TTFT]     {avg_ttft_ms:.2f} ms (to first token)")
-    # print(f"[TBT]      {avg_tbt_ms:.2f} ms (per additional token)")
+    print(f"[TTFT]     {avg_ttft_ms:.2f} ms (to first token)")
+    print(f"[TBT]      {avg_tbt_ms:.2f} ms (per additional token)")
     print(f"[latency]  {avg_full_ms:.2f} ms (20-token end-to-end)")
 
 if __name__ == "__main__":
     logging.set_verbosity_error()
     os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
-    
     torch_backend()  # Run the full-precision model
     print("\n" + "="*80 + "\n")
     autoawq_backend()  # Run the AWQ-quantized model

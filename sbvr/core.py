@@ -437,7 +437,19 @@ class sbvr(torch.nn.Module):
     
     @torch.inference_mode()
     def forward(self, x):
-        raise NotImplementedError("Use p_forward or d_forward instead. This function is deprecated.")
+        # Warn that this implementation assumes x is a 1D tensor
+        input = x.reshape(-1, x.shape[-1])
+        if input.shape[0] != 1:
+            raise ValueError(
+                r_str("Input x must be a 1D tensor, got shape: ") + str(x.shape))
+        return _fused_rtn_sbvr_1xtN_mm_T(
+                x = x,
+                r_bvr = self.bvr,
+                r_coeff_idx = self.coeff_idx,
+                r_coeff_cache = self.coeff_cache,
+                bias = self._get_dummy_bias(),
+                nRTN = self._get_rtn_bits()
+            )
     
     @torch.inference_mode()
     def p_forward(self, x):
