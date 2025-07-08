@@ -31,7 +31,7 @@ void launch_cuda_sbvr_row_deq_mm_T(
     int use_shfl = 0,
     int device_id = 0);
 
-// Declare the kernel launcher for fused Rtn6 LUT BVR (templated in the actual .cu file)
+// Declare the kernel launcher for fused Rtn7 LUT BVR (templated in the actual .cu file)
 void launch_fused_rtn_lut_bvr(
     const __half* x,
     uint32_t* out_bvr,
@@ -50,6 +50,7 @@ void launch_rtn_sbvr_1xtN_mm_T(
     int N, int K,
     int device_id = 0);
 
+// Declare the kernel launcher for fused RTN-SBVR 1xN mm_T (templated in the actual .cu file)
 void launch_fused_rtn_sbvr_1xtN_mm_T(
     __half* x,
     uint32_t* r_bvr, void* r_coeff_idx, __half* r_coeff_cache,
@@ -59,8 +60,16 @@ void launch_fused_rtn_sbvr_1xtN_mm_T(
     __half* bias, __half* out,
     int N, int K,
     int device_id = 0);
-
 void launch_cudaGetSymbolAddress_wrapper();
+
+// Declare the kernel launcher for prefill SBVR (templated in the actual .cu file)
+void launch_prefill_sbvr_kernel(
+    __half* x,
+    uint32_t* r_bvr, void* r_coeff_idx, __half* r_coeff_cache,
+    int r_num_sums,
+    int r_cache_size,
+    __half* bias, __half* out,
+    int M, int N, int K);
 
 int device_count;
 cudaDeviceProp cuda_prop_list[16];
@@ -225,7 +234,6 @@ torch::Tensor rtn_sbvr_1xtN_mm_T(
     return out;
 }
 
-
 torch::Tensor fused_rtn_sbvr_1xtN_mm_T(
     torch::Tensor x,
     torch::Tensor r_bvr,
@@ -264,7 +272,36 @@ torch::Tensor fused_rtn_sbvr_1xtN_mm_T(
     return out;
 }
 
+torch::Tensor sbvr_prefill(
+    torch::Tensor x,
+    torch::Tensor r_bvr,
+    torch::Tensor r_coeff_idx,
+    torch::Tensor r_coeff_cache,
+    torch::Tensor bias)
+{
+    const int M = x.size(0);
+    const int N = r_bvr.size(1);
+    const int K = x.size(1);
+    const int r_num_sums = r_bvr.size(2);
+    const int r_cache_size = r_coeff_cache.size(0);
 
+    auto out = torch::empty({M, N}, torch::dtype(torch::kFloat16).device(x.device()));
+    
+    __half* bias_ptr = nullptr;
+    if (bias.size(0) == N)
+        bias_ptr = reinterpret_cast<__half*>(bias.data_ptr<at::Half>());
+
+    launch_prefill_sbvr_kernel(
+        reinterpret_cast<__half*>(x.data_ptr<at::Half>()),
+        r_bvr.data_ptr<uint32_t>(), r_coeff_idx.data_ptr(), 
+        reinterpret_cast<__half*>(r_coeff_cache.data_ptr<at::Half>()),
+        r_num_sums, r_cache_size,
+        bias_ptr,
+        reinterpret_cast<__half*>(out.data_ptr<at::Half>()),
+        M, N, K);
+
+    return out;
+}
 
 void sbvr_cuda_init() 
 {
@@ -349,5 +386,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("bias"),
           py::arg("nRTN") = 7,
           "Fused RTN-SBVR 1xN Matrix-Matrix_Transposed Multiplication kernel");
-    }
-            
+    m.def("_sbvr_prefill", &sbvr_prefill,
+          py::arg("x"),
+          py::arg("r_bvr"),
+          py::arg("r_coeff_idx"),
+          py::arg("r_coeff_cache"),
+          py::arg("bias"),
+          "SBVR Prefill kernel"
+        );
+}

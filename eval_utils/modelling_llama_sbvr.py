@@ -55,6 +55,7 @@ import sbvr
 from sbvr.core import sbvrizer
 from sbvr import mm_T
 from sbvr.core import input_sbvr_mm_T
+from sbvr import _rtn_sbvr_1xtN_mm_T, _fused_rtn_sbvr_1xtN_mm_T, _sbvr_prefill, _sbvr_input_transfrom
 
 # import additional utils
 import transformers
@@ -325,72 +326,75 @@ class LlamaSbvrMLP(nn.Module):
         self.config = config
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
+        self.rtn_bits = config.rtn_bits
+        self.rtn_group_size = config.rtn_group_size
+        self.layer_idx = layer_idx
         
         self.gate_proj = sbvr.sbvr(
             encoder_config={
                 "num_sums": config.weight_num_sums,
-                "bvr_len": config.weight_bvr_len
+                "bvr_len": config.weight_bvr_len,
+                "rtn_bits": config.rtn_bits,
+                "rtn_group_size": config.rtn_group_size
             },
             verbose_level=1
         )
         self.up_proj = sbvr.sbvr(
             encoder_config={
                 "num_sums": config.weight_num_sums,
-                "bvr_len": config.weight_bvr_len
+                "bvr_len": config.weight_bvr_len,
+                "rtn_bits": config.rtn_bits,
+                "rtn_group_size": config.rtn_group_size
             },
             verbose_level=1
         )
         self.down_proj = sbvr.sbvr(
             encoder_config={
                 "num_sums": config.weight_num_sums,
-                "bvr_len": config.weight_bvr_len
+                "bvr_len": config.weight_bvr_len,
+                "rtn_bits": config.rtn_bits,
+                "rtn_group_size": config.rtn_group_size
             },
             verbose_level=1
         )
         self.act_fn = ACT2FN[config.hidden_act]
-        self.upgate_sbvrizer = sbvrizer(bvr_len=config.input_bvr_len, num_sums=config.input_num_sums, set_size=config.input_set_size)
-        self.down_sbvrizer = sbvrizer(bvr_len=config.input_bvr_len, num_sums=config.input_num_sums, set_size=config.input_set_size)
 
-    def forward(self, x, mode=0):
+    def forward(self, x, debug_mode=False):
         if self.config.pretraining_tp > 1:
             raise NotImplementedError("Slicing is not supported for sbvr injection")
         else:
-            if mode == 0:
-                x = self.upgate_sbvrizer(x, mode=0)
-                x = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
-                
-                # apply online hadamard transform
+            # debug mode: Restore weights and run the forward pass
+            if debug_mode:
+                x = self.act_fn(self.gate_proj.debug_forward(x)) * self.up_proj.debug_forward(x)
                 had_K, K = hadamard_utils.get_hadK(self.intermediate_size)
                 x = hadamard_utils.matmul_hadU_cuda(x, had_K, K)
-                x = self.down_sbvrizer(x, mode=0)
-                
-                down_proj = self.down_proj(x)
-            elif mode == 1 or mode == 2:
-                # reshape the input to 2D
-                bsz, seq_len = x.shape[0], x.shape[1]
-                x = x.reshape(-1, x.shape[-1])
-                
-                x = self.upgate_sbvrizer(x, mode=mode)
-                bvr, coeff_idx, coeff_set = self.upgate_sbvrizer.bvr, self.upgate_sbvrizer.coeff_idx, self.upgate_sbvrizer.coeff_set
-                x = self.act_fn(input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.gate_proj)) * \
-                    input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.up_proj)
-                
-                # apply online hadamard transform
-                # x = self.down_sbvrizer(x, mode=mode)
-                had_K, K = hadamard_utils.get_hadK(self.intermediate_size)
-                x = hadamard_utils.matmul_hadU_cuda(x, had_K, K)
-                x = self.down_sbvrizer(x, mode=mode)
-                bvr, coeff_idx, coeff_set = self.down_sbvrizer.bvr, self.down_sbvrizer.coeff_idx, self.down_sbvrizer.coeff_set
-                
-                down_proj = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.down_proj)
-                
-                # reshape the output to 3D
-                down_proj = down_proj.reshape(bsz, seq_len, -1)
-            else:
-                raise ValueError(f"Invalid mode: {mode}")
+                x = self.down_proj.debug_forward(x)
+                return x
         
-        return down_proj
 
+            bsz, seq_len = x.shape[0], x.shape[1]
+            if x.shape[1] != 1:
+                # prefill stage or multiple tokens, GEMM
+                x = x.view(seq_len, -1)
+                x = self.act_fn(self.gate_proj.p_forward(x)) * self.up_proj.p_forward(x)
+                had_K, K = hadamard_utils.get_hadK(self.intermediate_size)
+                x = hadamard_utils.matmul_hadU_cuda(x, had_K, K)
+                x = self.down_proj.p_forward(x)   
+            else:
+                # decode stage or single token, GEMV
+                x = x.view(-1, x.shape[-1])
+                out_bvr, scales = _sbvr_input_transfrom(x, nRTN=self.rtn_bits, group_size=self.rtn_group_size)
+                x = self.act_fn(self.gate_proj.d_forward(out_bvr=out_bvr, scales=scales)) * self.up_proj.d_forward(out_bvr=out_bvr, scales=scales)
+                had_K, K = hadamard_utils.get_hadK(self.intermediate_size)
+                x = hadamard_utils.matmul_hadU_cuda(x, had_K, K)
+                print(f"[Layer {self.layer_idx:2d}] BEFORE d_forward")
+                x = self.down_proj.d_forward(x)
+                torch.cuda.synchronize()
+                print(f"[Layer {self.layer_idx:2d}] AFTER d_forward")
+            # reshape the output
+            x = x.view(bsz, seq_len, -1)
+            
+            return x
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
@@ -429,38 +433,46 @@ class LlamaSbvrAttention(nn.Module):
         self.max_position_embeddings = config.max_position_embeddings
         self.rope_theta = config.rope_theta
         self.is_causal = True
+        
+        self.rtn_bits = config.rtn_bits
+        self.rtn_group_size = config.rtn_group_size
 
         self.q_proj = sbvr.sbvr(
             encoder_config={
                 "num_sums": config.weight_num_sums,
-                "bvr_len": config.weight_bvr_len
+                "bvr_len": config.weight_bvr_len,
+                "rtn_bits": config.rtn_bits,
+                "rtn_group_size": config.rtn_group_size
             },
             verbose_level=1
         )
         self.k_proj = sbvr.sbvr(
             encoder_config={
                 "num_sums": config.weight_num_sums,
-                "bvr_len": config.weight_bvr_len
+                "bvr_len": config.weight_bvr_len,
+                "rtn_bits": config.rtn_bits,
+                "rtn_group_size": config.rtn_group_size
             },
             verbose_level=1
         )
         self.v_proj = sbvr.sbvr(
             encoder_config={
                 "num_sums": config.weight_num_sums,
-                "bvr_len": config.weight_bvr_len
+                "bvr_len": config.weight_bvr_len,
+                "rtn_bits": config.rtn_bits,
+                "rtn_group_size": config.rtn_group_size
             },
             verbose_level=1
         )
         self.o_proj = sbvr.sbvr(
             encoder_config={
                 "num_sums": config.weight_num_sums,
-                "bvr_len": config.weight_bvr_len
+                "bvr_len": config.weight_bvr_len,
+                "rtn_bits": config.rtn_bits,
+                "rtn_group_size": config.rtn_group_size
             },
             verbose_level=1
         )
-        
-        self.qkv_sbvrizer = sbvrizer(bvr_len=config.input_bvr_len, num_sums=config.input_num_sums, set_size=config.input_set_size)
-        self.o_sbvrizer = sbvrizer(bvr_len=config.input_bvr_len, num_sums=config.input_num_sums, set_size=config.input_set_size)
 
         # TODO (joao): remove in v4.46 (RoPE is computed in the model, not in the decoder layers)
         self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
@@ -477,36 +489,32 @@ class LlamaSbvrAttention(nn.Module):
         position_embeddings: Optional[
             Tuple[torch.Tensor, torch.Tensor]
         ] = None,  # will become mandatory in v4.46
-        mode = 0,
+        debug_mode = False,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
         if self.config.pretraining_tp > 1:
             raise NotImplementedError("Slicing is not supported for sbvr injection")
+        elif debug_mode:
+            query_states = self.q_proj.debug_forward(hidden_states)
+            key_states = self.k_proj.debug_forward(hidden_states)
+            value_states = self.v_proj.debug_forward(hidden_states)
         else:
-            if mode == 0:
-                hidden_states = self.qkv_sbvrizer(hidden_states, mode=0)
-                query_states = self.q_proj(hidden_states)
-                key_states = self.k_proj(hidden_states)
-                value_states = self.v_proj(hidden_states)
-            elif mode == 1 or mode == 2:
-                # reshape the input to 2D
-                hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
-                
-                hidden_states = self.qkv_sbvrizer(hidden_states, mode=mode)
-                bvr, coeff_idx, coeff_set = self.qkv_sbvrizer.bvr, self.qkv_sbvrizer.coeff_idx, self.qkv_sbvrizer.coeff_set
-                query_states = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.q_proj)
-                key_states = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.k_proj)
-                value_states = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.v_proj)
-                
-                # reshape the output to 3D
-                query_states = query_states.reshape(bsz, q_len, -1)
-                key_states = key_states.reshape(bsz, q_len, -1)
-                value_states = value_states.reshape(bsz, q_len, -1)
+            if q_len != 1:
+                # prefill stage or multiple tokens, GEMM
+                hidden_states = hidden_states.view(q_len, -1)
+                query_states = self.q_proj.p_forward(hidden_states)
+                key_states = self.k_proj.p_forward(hidden_states)
+                value_states = self.v_proj.p_forward(hidden_states)
             else:
-                raise ValueError(f"invalid mode: {mode}")
-
+                # decode stage or single token, GEMV
+                hidden_states = hidden_states.view(q_len, -1)
+                out_bvr, scales = _sbvr_input_transfrom(hidden_states, nRTN=self.rtn_bits, group_size=self.rtn_group_size)
+                query_states = self.q_proj.d_forward(out_bvr=out_bvr, scales=scales)
+                key_states = self.k_proj.d_forward(out_bvr=out_bvr, scales=scales)
+                value_states = self.v_proj.d_forward(out_bvr=out_bvr, scales=scales)
+                
         query_states = query_states.view(
             bsz, q_len, self.num_heads, self.head_dim
         ).transpose(1, 2)
@@ -564,26 +572,18 @@ class LlamaSbvrAttention(nn.Module):
             )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
-
-        attn_output = attn_output.reshape(bsz, q_len, -1)
+        attn_output = attn_output.view(q_len, -1)
 
         if self.config.pretraining_tp > 1:
             raise NotImplementedError("Slicing is not supported for sbvr injection")
+        elif debug_mode:
+            attn_output = self.o_proj.debug_forward(attn_output)
         else:
-            if mode == 0:
-                attn_output = self.o_proj(attn_output)
-            elif mode == 1 or mode == 2:
-                # reshape the input to 2D
-                attn_output = attn_output.reshape(-1, attn_output.shape[-1])
-                
-                attn_output = self.o_sbvrizer(attn_output, mode=mode)
-                bvr, coeff_idx, coeff_set = self.o_sbvrizer.bvr, self.o_sbvrizer.coeff_idx, self.o_sbvrizer.coeff_set
-                attn_output = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.o_proj)
-                
-                # reshape the output to 3D
-                attn_output = attn_output.reshape(bsz, q_len, -1)
+            if q_len != 1:
+                attn_output = self.o_proj.p_forward(attn_output)
             else:
-                raise ValueError(f"invalid mode: {mode}")
+                attn_output = self.o_proj.d_forward(attn_output)
+        attn_output = attn_output.view(bsz, q_len, -1)
 
         if not output_attentions:
             attn_weights = None
@@ -618,7 +618,7 @@ class LlamaSbvrFlashAttention2(LlamaSbvrAttention):
         position_embeddings: Optional[
             Tuple[torch.Tensor, torch.Tensor]
         ] = None,  # will become mandatory in v4.46
-        mode = 0,
+        debug_mode = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if isinstance(past_key_value, StaticCache):
             raise ValueError(
@@ -630,27 +630,26 @@ class LlamaSbvrFlashAttention2(LlamaSbvrAttention):
 
         bsz, q_len, _ = hidden_states.size()
         
-        if mode == 0:
-            hidden_states = self.qkv_sbvrizer(hidden_states, mode=0)
-            query_states = self.q_proj(hidden_states)
-            key_states = self.k_proj(hidden_states)
-            value_states = self.v_proj(hidden_states)
-        elif mode == 1 or mode == 2:
-            # reshape the input to 2D
-            hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
-            
-            hidden_states = self.qkv_sbvrizer(hidden_states, mode=mode)
-            bvr, coeff_idx, coeff_set = self.qkv_sbvrizer.bvr, self.qkv_sbvrizer.coeff_idx, self.qkv_sbvrizer.coeff_set
-            query_states = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.q_proj)
-            key_states = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.k_proj)
-            value_states = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.v_proj)
-            
-            # reshape the output to 3D
-            query_states = query_states.reshape(bsz, q_len, -1)
-            key_states = key_states.reshape(bsz, q_len, -1)
-            value_states = value_states.reshape(bsz, q_len, -1)
+        if self.config.pretraining_tp > 1:
+            raise NotImplementedError("Slicing is not supported for sbvr injection")
+        elif debug_mode:
+            query_states = self.q_proj.debug_forward(hidden_states)
+            key_states = self.k_proj.debug_forward(hidden_states)
+            value_states = self.v_proj.debug_forward(hidden_states)
         else:
-            raise ValueError(f"invalid mode: {mode}")
+            if q_len != 1:
+                # prefill stage or multiple tokens, GEMM
+                hidden_states = hidden_states.view(q_len, -1)
+                query_states = self.q_proj.p_forward(hidden_states)
+                key_states = self.k_proj.p_forward(hidden_states)
+                value_states = self.v_proj.p_forward(hidden_states)
+            else:
+                # decode stage or single token, GEMV
+                hidden_states = hidden_states.view(q_len, -1)
+                out_bvr, scales = _sbvr_input_transfrom(hidden_states, nRTN=self.rtn_bits, group_size=self.rtn_group_size)
+                query_states = self.q_proj.d_forward(out_bvr=out_bvr, scales=scales)
+                key_states = self.k_proj.d_forward(out_bvr=out_bvr, scales=scales)
+                value_states = self.v_proj.d_forward(out_bvr=out_bvr, scales=scales)
         
         # Flash attention requires the input to have the shape
         # batch_size x seq_length x head_dim x hidden_dim
@@ -734,21 +733,18 @@ class LlamaSbvrFlashAttention2(LlamaSbvrAttention):
         )
 
         attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
+        attn_output = attn_output.view(q_len, -1)
         
-        if mode == 0:
-            attn_output = self.o_proj(attn_output)
-        elif mode == 1 or mode == 2:
-            # reshape the input to 2D
-            attn_output = attn_output.reshape(-1, attn_output.shape[-1])
-            
-            attn_output = self.o_sbvrizer(attn_output, mode=mode)
-            bvr, coeff_idx, coeff_set = self.o_sbvrizer.bvr, self.o_sbvrizer.coeff_idx, self.o_sbvrizer.coeff_set
-            attn_output = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.o_proj)
-            
-            # reshape the output to 3D
-            attn_output = attn_output.reshape(bsz, q_len, -1)
+        if self.config.pretraining_tp > 1:
+            raise NotImplementedError("Slicing is not supported for sbvr injection")
+        elif debug_mode:
+            attn_output = self.o_proj.debug_forward(attn_output)
         else:
-            raise ValueError(f"invalid mode: {mode}")
+            if q_len != 1:
+                attn_output = self.o_proj.p_forward(attn_output)
+            else:
+                attn_output = self.o_proj.d_forward(attn_output)
+        attn_output = attn_output.view(bsz, q_len, -1)
         
         if not output_attentions:
             attn_weights = None
@@ -776,7 +772,7 @@ class LlamaSbvrSdpaAttention(LlamaSbvrAttention):
         position_embeddings: Optional[
             Tuple[torch.Tensor, torch.Tensor]
         ] = None,  # will become mandatory in v4.46
-        mode = 0,
+        debug_mode = False,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if output_attentions:
@@ -794,31 +790,31 @@ class LlamaSbvrSdpaAttention(LlamaSbvrAttention):
                 use_cache=use_cache,
                 cache_position=cache_position,
                 position_embeddings=position_embeddings,
+                debug_mode=debug_mode,
             )
 
         bsz, q_len, _ = hidden_states.size()
 
-        if mode == 0:
-            hidden_states = self.qkv_sbvrizer(hidden_states, mode=0)
-            query_states = self.q_proj(hidden_states)
-            key_states = self.k_proj(hidden_states)
-            value_states = self.v_proj(hidden_states)
-        elif mode == 1 or mode == 2:
-            # reshape the input to 2D
-            hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
-            
-            hidden_states = self.qkv_sbvrizer(hidden_states, mode=mode)
-            bvr, coeff_idx, coeff_set = self.qkv_sbvrizer.bvr, self.qkv_sbvrizer.coeff_idx, self.qkv_sbvrizer.coeff_set
-            query_states = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.q_proj)
-            key_states = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.k_proj)
-            value_states = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.v_proj)
-            
-            # reshape the output to 3D
-            query_states = query_states.reshape(bsz, q_len, -1)
-            key_states = key_states.reshape(bsz, q_len, -1)
-            value_states = value_states.reshape(bsz, q_len, -1)
+        if self.config.pretraining_tp > 1:
+            raise NotImplementedError("Slicing is not supported for sbvr injection")
+        elif debug_mode:
+            query_states = self.q_proj.debug_forward(hidden_states)
+            key_states = self.k_proj.debug_forward(hidden_states)
+            value_states = self.v_proj.debug_forward(hidden_states)
         else:
-            raise ValueError(f"invalid mode: {mode}")
+            if q_len != 1:
+                # prefill stage or multiple tokens, GEMM
+                hidden_states = hidden_states.view(q_len, -1)
+                query_states = self.q_proj.p_forward(hidden_states)
+                key_states = self.k_proj.p_forward(hidden_states)
+                value_states = self.v_proj.p_forward(hidden_states)
+            else:
+                # decode stage or single token, GEMV
+                hidden_states = hidden_states.view(q_len, -1)
+                out_bvr, scales = _sbvr_input_transfrom(hidden_states, nRTN=self.rtn_bits, group_size=self.rtn_group_size)
+                query_states = self.q_proj.d_forward(out_bvr=out_bvr, scales=scales)
+                key_states = self.k_proj.d_forward(out_bvr=out_bvr, scales=scales)
+                value_states = self.v_proj.d_forward(out_bvr=out_bvr, scales=scales)
 
         query_states = query_states.view(
             bsz, q_len, self.num_heads, self.head_dim
@@ -879,32 +875,26 @@ class LlamaSbvrSdpaAttention(LlamaSbvrAttention):
         )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(bsz, q_len, -1)
+        attn_output = attn_output.view(q_len, -1)
         
-        if mode == 0:
-            attn_output = self.o_proj(attn_output)
-        elif mode == 1 or mode == 2:
-            # reshape the input to 2D
-            attn_output = attn_output.reshape(-1, attn_output.shape[-1])
-            
-            attn_output = self.o_sbvrizer(attn_output, mode=mode)
-            bvr, coeff_idx, coeff_set = self.o_sbvrizer.bvr, self.o_sbvrizer.coeff_idx, self.o_sbvrizer.coeff_set
-            attn_output = input_sbvr_mm_T(bvr, coeff_idx, coeff_set, self.o_proj)
-            
-            # reshape the output to 3D
-            attn_output = attn_output.reshape(bsz, q_len, -1)
+        if self.config.pretraining_tp > 1:
+            raise NotImplementedError("Slicing is not supported for sbvr injection")
+        elif debug_mode:
+            attn_output = self.o_proj.debug_forward(attn_output)
         else:
-            raise ValueError(f"invalid mode: {mode}")
+            if q_len != 1:
+                attn_output = self.o_proj.p_forward(attn_output)
+            else:
+                attn_output = self.o_proj.d_forward(attn_output)
+        attn_output = attn_output.view(bsz, q_len, -1)
 
         return attn_output, None, past_key_value
-
 
 LLAMA_ATTENTION_CLASSES = {
     "eager": LlamaSbvrAttention,
     "flash_attention_2": LlamaSbvrFlashAttention2,
     "sdpa": LlamaSbvrSdpaAttention,
 }
-
 
 class LlamaSbvrDecoderLayer(nn.Module):
     def __init__(self, config: LlamaConfig, layer_idx: int):
@@ -933,7 +923,7 @@ class LlamaSbvrDecoderLayer(nn.Module):
         position_embeddings: Optional[
             Tuple[torch.Tensor, torch.Tensor]
         ] = None,  # will become mandatory in v4.46,
-        mode = 0,
+        debug_mode = False,
         **kwargs,
     ) -> Tuple[
         torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
@@ -974,7 +964,7 @@ class LlamaSbvrDecoderLayer(nn.Module):
             use_cache=use_cache,
             cache_position=cache_position,
             position_embeddings=position_embeddings,
-            mode=mode,
+            debug_mode=debug_mode,
             **kwargs,
         )
         hidden_states = residual + hidden_states
@@ -982,7 +972,8 @@ class LlamaSbvrDecoderLayer(nn.Module):
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states, mode=mode)
+        hidden_states = self.mlp(hidden_states, debug_mode=debug_mode)
+        
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
@@ -1168,7 +1159,7 @@ class LlamaSbvrModel(LlamaPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        mode = 0,
+        debug_mode: bool = False,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = (
             output_attentions
@@ -1255,7 +1246,7 @@ class LlamaSbvrModel(LlamaPreTrainedModel):
                     use_cache=use_cache,
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
-                    mode=mode
+                    debug_mode=debug_mode
                 )
 
             hidden_states = layer_outputs[0]
@@ -1374,17 +1365,15 @@ class LlamaForSbvrLM(LlamaPreTrainedModel):
             raise ValueError("sbvr_state_dict must be provided")
         weight_bvr_len = sbvr_state_dict["weight_bvr_len"]
         weight_num_sums = sbvr_state_dict["weight_num_sums"]
-        input_bvr_len = sbvr_state_dict["input_bvr_len"]
-        input_num_sums = sbvr_state_dict["input_num_sums"]
-        input_set_size = sbvr_state_dict["input_set_size"]
+        rtn_group_size = sbvr_state_dict["rtn_group_size"]
+        rtn_bits = sbvr_state_dict["rtn_bits"]
         root_sbvr_path = sbvr_state_dict.get("root_sbvr_path", None)
         
         # write them down to the config
         config.weight_bvr_len = weight_bvr_len
         config.weight_num_sums = weight_num_sums
-        config.input_bvr_len = input_bvr_len
-        config.input_num_sums = input_num_sums
-        config.input_set_size = input_set_size
+        config.rtn_group_size = rtn_group_size
+        config.rtn_bits = rtn_bits
         config.root_sbvr_path = root_sbvr_path # can be None if not provided
         
         self.model = LlamaSbvrModel(config)
@@ -1396,11 +1385,9 @@ class LlamaForSbvrLM(LlamaPreTrainedModel):
         # self.pseudo_fuse_layer_norms()
         # self.rotate_model()
         
-    def load_sbvr_weights(self, root_sbvr_path: str = None, sbvrizer_path: str = None, device: str = "cuda:0"):
+    def load_sbvr_weights(self, root_sbvr_path: str = None, device: str = "cuda:0"):
         if root_sbvr_path is None:
             raise ValueError("root_sbvr_path must be provided")
-        if sbvrizer_path is None:
-            raise ValueError("sbvrizer_path must be provided")
         
         for layer_idx, layer in enumerate(self.model.layers):
             sbvr_q_proj_path = os.path.join(root_sbvr_path, f"sbvr_layer_{layer_idx}_self_attn.q_proj.module.pt")
@@ -1412,11 +1399,6 @@ class LlamaForSbvrLM(LlamaPreTrainedModel):
             sbvr_gate_proj_path = os.path.join(root_sbvr_path, f"sbvr_layer_{layer_idx}_mlp.gate_proj.module.pt")
             sbvr_down_proj_path = os.path.join(root_sbvr_path, f"sbvr_layer_{layer_idx}_mlp.down_proj.module.pt")
             
-            sbvrizer_qkv_path = os.path.join(sbvrizer_path, f"{layer_idx}_k_proj.pt")
-            sbvrizer_o_proj_path = os.path.join(sbvrizer_path, f"{layer_idx}_o_proj.pt")
-            sbvrizer_upgate_path = os.path.join(sbvrizer_path, f"{layer_idx}_gate_proj.pt")
-            sbvrizer_down_path = os.path.join(sbvrizer_path, f"{layer_idx}_down_proj.pt")
-            
             layer.self_attn.q_proj = sbvr.load(sbvr_q_proj_path)
             layer.self_attn.k_proj = sbvr.load(sbvr_k_proj_path)
             layer.self_attn.v_proj = sbvr.load(sbvr_v_proj_path)
@@ -1425,11 +1407,6 @@ class LlamaForSbvrLM(LlamaPreTrainedModel):
             layer.mlp.up_proj = sbvr.load(sbvr_up_proj_path)
             layer.mlp.gate_proj = sbvr.load(sbvr_gate_proj_path)
             layer.mlp.down_proj = sbvr.load(sbvr_down_proj_path)
-            
-            layer.self_attn.qkv_sbvrizer.load_coeff_set(torch.load(sbvrizer_qkv_path, map_location=device)["coeff_set"])
-            layer.self_attn.o_sbvrizer.load_coeff_set(torch.load(sbvrizer_o_proj_path, map_location=device)["coeff_set"])
-            layer.mlp.upgate_sbvrizer.load_coeff_set(torch.load(sbvrizer_upgate_path, map_location=device)["coeff_set"])
-            layer.mlp.down_sbvrizer.load_coeff_set(torch.load(sbvrizer_down_path, map_location=device)["coeff_set"])
             
         print(f"Loaded SBVR weights from {root_sbvr_path}")
 
@@ -1506,12 +1483,6 @@ class LlamaForSbvrLM(LlamaPreTrainedModel):
             layer.self_attn.o_proj = layer.self_attn.o_proj.to(dtype)
             layer.self_attn.o_proj.original_dtype = dtype
             
-            layer.self_attn.qkv_sbvrizer = layer.self_attn.qkv_sbvrizer.to(dtype)
-            layer.self_attn.qkv_sbvrizer.original_dtype = dtype
-            
-            layer.self_attn.o_sbvrizer = layer.self_attn.o_sbvrizer.to(dtype)
-            layer.self_attn.o_sbvrizer.original_dtype = dtype
-            
             # mlp
             layer.mlp.up_proj = layer.mlp.up_proj.to(dtype)
             layer.mlp.up_proj.original_dtype = dtype
@@ -1521,12 +1492,6 @@ class LlamaForSbvrLM(LlamaPreTrainedModel):
             
             layer.mlp.down_proj = layer.mlp.down_proj.to(dtype)
             layer.mlp.down_proj.original_dtype = dtype
-            
-            layer.mlp.upgate_sbvrizer = layer.mlp.upgate_sbvrizer.to(dtype)
-            layer.mlp.upgate_sbvrizer.original_dtype = dtype
-            
-            layer.mlp.down_sbvrizer = layer.mlp.down_sbvrizer.to(dtype)
-            layer.mlp.down_sbvrizer.original_dtype = dtype
 
     @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
     @replace_return_docstrings(
@@ -1546,7 +1511,7 @@ class LlamaForSbvrLM(LlamaPreTrainedModel):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         num_logits_to_keep: int = 0,
-        mode = 0
+        debug_mode: bool = False
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         Args:
@@ -1604,7 +1569,7 @@ class LlamaForSbvrLM(LlamaPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
-            mode=mode
+            debug_mode=debug_mode
         )
 
         hidden_states = outputs[0]

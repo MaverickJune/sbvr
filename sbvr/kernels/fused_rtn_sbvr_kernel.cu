@@ -376,12 +376,22 @@ void launch_fused_rtn_sbvr_1xtN_mm_T(
 
     const bool use_r_uint8 = (r_cache_size < 256);
 
-    if (use_r_uint8 && r_num_sums == 4 && nRTN == 7) {
-        launch_fused_rtn_sbvr_1xtN_mm_T_kernel_wrapper<uint8_t, 4>(
-            x, r_bvr, r_coeff_idx, r_coeff_cache,
-            bias, out, N, K, device_id);
-    } 
-    else {
-        throw std::runtime_error("Unsupported r_num_sums value");
+    if(use_r_uint8) {
+        if (r_num_sums == 8 && nRTN == 7) {
+            launch_fused_rtn_sbvr_1xtN_mm_T_kernel_wrapper<uint8_t, 8>(
+                x, r_bvr, r_coeff_idx, r_coeff_cache,
+                bias, out, N, K, device_id);
+        } else {
+            throw std::runtime_error("Unsupported r_num_sums value for uint8_t");
+        }
+    } else {
+        if (r_num_sums == 8 && nRTN == 7) {
+            launch_fused_rtn_sbvr_1xtN_mm_T_kernel_wrapper<uint16_t, 8>(
+                x, r_bvr, r_coeff_idx, r_coeff_cache,
+                bias, out, N, K, device_id);
+        } else {
+            throw std::runtime_error("Unsupported r_num_sums value for uint16_t");
+        }
     }
+
 }

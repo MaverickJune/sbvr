@@ -120,7 +120,7 @@ def rotate_ov_proj(layer, head_num, head_dim, R2=None):
 
 
 @torch.inference_mode()
-def rotate_model(model, args):
+def rotate_model(model, args, eff_multi_gpu: bool = False):
     print("Rotating the model...")
     R1 = get_orthogonal_matrix(model.config.hidden_size, args.rotate_mode)
     if args.optimized_rotation_path is not None:

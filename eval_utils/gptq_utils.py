@@ -14,9 +14,11 @@ import math
 import pprint
 import time
 import os
+import sys
 
 import torch
 import torch.nn as nn
+import torch.multiprocessing as mp
 import tqdm
 
 import sbvr
@@ -46,10 +48,11 @@ class sbvr_wrapper(sbvr.sbvr):
             self.bvr_idx = 0
             
         if enable_blockwise_gptq:
-            if x.orig_shape[-1] % self.bvr_len != 0:
-                padded_len = (x.orig_shape[-1] + self.bvr_len - 1) // self.bvr_len * self.bvr_len - x.orig_shape[-1]
-                pad = torch.zeros(x.orig_shape[0], padded_len, device=x.device)
+            if x_orig_shape[-1] % self.bvr_len != 0:
+                padded_len = (x_orig_shape[-1] + self.bvr_len - 1) // self.bvr_len * self.bvr_len - x_orig_shape[-1]
+                pad = torch.zeros(x_orig_shape[0], padded_len, device=x.device)
                 x = torch.cat([x, pad], dim=-1).reshape(-1, 1)
+            x = x.reshape(-1, 1).contiguous()
             
         q = torch.zeros_like(x.flatten())
         for i in range(0, x.shape[0], self.bvr_len):
@@ -431,6 +434,226 @@ def gptq_fwrd(model, dataloader, dev, args):
     print(utils.g_str("GPTQ Quantization Done!"))
     return quantizers
 
+@torch.inference_mode()
+def _per_gpu_sbvr_fwrd(model, curr_device, args, n_gpus,
+                       attention_mask, position_ids,
+                       inps):
+    # setup basic things
+    sequential = [
+        [
+            "self_attn.k_proj.module",
+            "self_attn.v_proj.module",
+            "self_attn.q_proj.module",
+        ],
+        ["self_attn.o_proj.module"],
+        ["mlp.up_proj.module", "mlp.gate_proj.module"],
+        ["mlp.down_proj.module"],
+    ]
+    
+    layers = model.model.layers
+    
+    attention_mask = attention_mask.to(curr_device) if attention_mask is not None else None
+    position_ids = position_ids.to(curr_device)
+
+    inps = inps.clone().to(curr_device)
+    outs = torch.zeros_like(inps)
+    
+    # get the dtype of the model
+    dtype = next(iter(model.parameters())).dtype
+    
+    # main logic
+    for i in range(len(layers)):
+        layer = layers[i].to(curr_device)
+        if (i % n_gpus == curr_device):
+            full = quant_utils.find_qlayers(layer, layers=[torch.nn.Linear])
+            for names in sequential:
+                subset = {n: full[n] for n in names}
+
+                gptq = {}
+                for name in subset:
+                    print(utils.y_str(f"Device {curr_device}: ") + 
+                                        f"L{i} {name}", end="  ", flush=True)
+                    layer_weight_bits = args.w_bits
+                    layer_weight_sym = not (args.w_asym)
+                    if "lm_head" in name:
+                        layer_weight_bits = 16
+                        continue
+                    if args.int8_down_proj and "down_proj" in name:
+                        layer_weight_bits = 8
+                    gptq[name] = GPTQ(subset[name])
+                    if args.w_sbvr:
+                        gptq[name].quantizer = sbvr_wrapper(encoder_config={
+                            "num_sums": layer_weight_bits,
+                            "bvr_len": args.bvr_groupsize,
+                            "enable_blockwise_gptq": args.gptq_blockwise,
+                        }, verbose=1)
+                    else:
+                        gptq[name].quantizer = quant_utils.WeightQuantizer()
+                        gptq[name].quantizer.configure(
+                            layer_weight_bits,
+                            perchannel=True,
+                            sym=layer_weight_sym,
+                            mse=args.w_clip,
+                        )
+
+                def add_batch(name):
+                    def tmp(_, inp, out):
+                        gptq[name].add_batch(inp[0].data, out.data)  # noqa: F821
+
+                    return tmp
+
+                handles = []
+                for name in subset:
+                    handles.append(subset[name].register_forward_hook(add_batch(name)))
+                for j in range(args.nsamples):
+                    outs[j] = layer(
+                        inps[j].unsqueeze(0),
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                    )[0]
+                for h in handles:
+                    h.remove()
+
+                for name in subset:
+                    tick = time.time()
+                    layer_w_groupsize = args.w_groupsize
+                    if args.w_sbvr:
+                        path = args.save_qmodel_path + f"/sbvr_layer_{i}_{name}.pt"
+                        if os.path.exists(path):
+                            gptq[name].quantizer = sbvr.load(path, device=curr_device)
+                            
+                            if not args.gptq_blockwise:
+                                q = gptq[name].quantizer.decode().T
+                            else:
+                                q = gptq[name].quantizer.decode()
+                                
+                            gptq[name].layer.weight.data = \
+                                        q.to(gptq[name].layer.weight.data.dtype)
+                            gptq[name].quantizer = None
+                        else:
+                            gptq[name].fasterquant(
+                                percdamp=args.percdamp,
+                                groupsize=layer_w_groupsize,
+                                actorder=args.act_order,
+                                static_groups=False,
+                                export_to_et=args.export_to_et,
+                                blockwise_only=args.gptq_blockwise,
+                                blocksize=args.bvr_groupsize
+                            )
+                            print(utils.y_str(f"Device {curr_device}: ") +
+                                f"Processed {gptq[name].quantizer.bvr_idx} BVRs in "
+                                f"{time.time() - tick:.2f}s")
+                            gptq[name].quantizer.finalize_encoding()
+                            gptq[name].quantizer.save(args.save_qmodel_path + 
+                                                    f"/sbvr_layer_{i}_{name}.pt")
+                            gptq[name].quantizer = None
+                    else:
+                            gptq[name].fasterquant(
+                            percdamp=args.percdamp,
+                            groupsize=layer_w_groupsize,
+                            actorder=args.act_order,
+                            static_groups=False,
+                            export_to_et=args.export_to_et,
+                        )
+                    gptq[name].free()
+                del gptq
+
+        for j in range(args.nsamples):
+            outs[j] = layer(
+                inps[j].unsqueeze(0),
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+            )[0]
+
+        layers[i] = layer.cpu()
+        del layer
+        torch.cuda.empty_cache()
+
+        inps, outs = outs, inps
+        
+    utils.cleanup_memory(verbose=True)
+    
+@torch.inference_mode()
+def sbvrize_fwrd(model, dataloader, args):
+    logging.info("-----SBVR Quantization-----")
+    
+    use_cache = model.config.use_cache
+    model.config.use_cache = False
+    layers = model.model.layers
+    
+    # use cuda:0 to get the attention mask and position ids
+    dev = "cuda:0"
+    model.model.embed_tokens = model.model.embed_tokens.to(dev)
+    model.model.norm = model.model.norm.to(dev)
+    model.model.rotary_emb = model.model.rotary_emb.to(dev)
+    layers[0] = layers[0].to(dev)
+
+    dtype = next(iter(model.parameters())).dtype
+    inps = torch.zeros(
+        (args.nsamples, 2048, model.config.hidden_size), dtype=dtype, device=dev
+    )
+    cache = {"i": 0, "attention_mask": None}
+
+    class Catcher(nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+
+        def forward(self, inp, **kwargs):
+            inps[cache["i"]] = inp
+            cache["i"] += 1
+            cache["attention_mask"] = kwargs["attention_mask"]
+            cache["position_ids"] = kwargs["position_ids"]
+            # print(f"kwargs: {kwargs}") # 11
+            raise ValueError
+
+    layers[0] = Catcher(layers[0])
+    for batch in dataloader:
+        try:
+            model(batch[0].to(dev))
+        except ValueError:
+            pass
+    layers[0] = layers[0].module
+    
+    # print(f"cache: {cache}") # 11
+    # sys.exit(0) # 11
+
+    layers[0] = layers[0].cpu()
+    model.model.embed_tokens = model.model.embed_tokens.cpu()
+    model.model.norm = model.model.norm.cpu()
+    model.model.rotary_emb = model.model.rotary_emb.cpu()
+    inps = inps.cpu()
+    
+    torch.cuda.empty_cache()
+    utils.cleanup_memory(verbose=True)
+    
+    # print(f"Reached the infinite loop for mem debugging") # 11
+    # while True:
+    #     pass
+
+    outs = torch.zeros_like(inps)
+    attention_mask = cache["attention_mask"].cpu() if cache["attention_mask"] is not None else None # attention mask can be None since it use SDPA
+    position_ids = cache["position_ids"].cpu()
+    
+    # initialize multiprocessing for SBVR
+    mp.set_start_method('spawn', force=True)
+    mp.set_sharing_strategy('file_system')
+    n_gpus = torch.cuda.device_count()
+    
+    if n_gpus == 0:
+        raise ValueError("No GPUs available for processing")
+    
+    proc_list = [None for _ in range(n_gpus)]
+    for i in range(n_gpus):
+        curr_device = i
+        proc_list[i] = mp.Process(
+            target=_per_gpu_sbvr_fwrd,
+            args=(model, curr_device, args, n_gpus, attention_mask, position_ids, inps)
+        )
+        proc_list[i].start()
+    for i in range(n_gpus):
+        proc_list[i].join()
+    print(utils.g_str("SBVR Quantization Done!"))
 
 @torch.no_grad()
 def rtn_fwrd(model, dev, args, custom_layers=None):

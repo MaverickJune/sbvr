@@ -5,7 +5,8 @@ import numpy as np
 from tqdm import tqdm
 from .encoder import sbvr_encoder
 from .utils import g_str, y_str, b_str, r_str, sbvr_serialized, cleanup_memory
-from sbvr.sbvr_cuda import _sbvr_mm_T
+from sbvr.sbvr_cuda import _sbvr_mm_T, _sbvr_prefill, _sbvr_input_transfrom, _rtn_sbvr_1xtN_mm_T, _fused_rtn_sbvr_1xtN_mm_T
+# from sbvr import _sbvr_prefill, _sbvr_input_transfrom, _rtn_sbvr_1xtN_mm_T, _fused_rtn_sbvr_1xtN_mm_T
 import os
 import sys
         
@@ -21,6 +22,7 @@ class sbvr(torch.nn.Module):
             torch.device("cuda") if torch.cuda.is_available() \
                 else torch.device("cpu")
         self.verbose_level = verbose_level
+        # self._get_dummy_bias()
         
         if data is not None and serialized is not None:
             raise ValueError(
@@ -46,6 +48,8 @@ class sbvr(torch.nn.Module):
                     input_coeff.to(_device), requires_grad=False)
             else:
                 self.input_coeff = None
+                
+            self._get_dummy_bias()
         else:
             if encoder_config is None:
                 encoder_config = {} 
@@ -55,6 +59,9 @@ class sbvr(torch.nn.Module):
             self.bvr_len = self.encoder.bvr_len
             self.compute_dtype = self.encoder.compute_dtype
             self.bvr_dtype = self.encoder.bvr_dtype
+            
+            self.rtn_bits = self.encoder.rtn_bits
+            self.rtn_group_size = self.encoder.rtn_group_size
             
             self.enable_blockwise_gptq = self.encoder.enable_blockwise_gptq
             
@@ -73,6 +80,8 @@ class sbvr(torch.nn.Module):
             self.coeff_idx = None
             self.coeff_cache = None
             self.input_coeff = None
+            
+            # self._get_dummy_bias()
             if data is not None:
                 self._batched_encode(data.to(_device).to(self.compute_dtype))
     
@@ -108,6 +117,20 @@ class sbvr(torch.nn.Module):
                                           dtype=self.compute_dtype,
                                           device=self.coeff_cache.device)
         return self.dummy_bias
+    
+    def _set_rtn_bits(self, num_bits):
+        '''
+        Set the number of bits for the rtn encoding of input
+        '''
+        self.rtn_bits = num_bits
+        
+    def _get_rtn_bits(self):
+        '''
+        Get the number of bits for the rtn encoding of input
+        '''
+        if not hasattr(self, 'rtn_bits'):
+            self.rtn_bits = 7
+        return self.rtn_bits
         
     def _get_all_points(self, coeff: torch.tensor):
         if not hasattr(self, 'bin_combs'):
@@ -414,14 +437,56 @@ class sbvr(torch.nn.Module):
     
     @torch.inference_mode()
     def forward(self, x):
-        '''
-        TODO: Fix this part after prefill kernel is implemented
-        '''
-        if not hasattr(self, 'restored_w'):
-            self.restored_w = self.decode()
-            print(b_str("restoration complete"))
-        return x @ self.restored_w.T
+        raise NotImplementedError("Use p_forward or d_forward instead. This function is deprecated.")
     
+    @torch.inference_mode()
+    def p_forward(self, x):
+        '''
+        prefill forward pass for the SBVR object.
+        '''
+        self._get_dummy_bias()
+        return _sbvr_prefill(
+            x, self.bvr, self.coeff_idx, self.coeff_cache, self.dummy_bias
+        )
+        
+    @torch.inference_mode()
+    def d_forward(self, x=None, out_bvr=None, scales=None):
+        '''
+        decode forward pass for the SBVR object.
+        '''
+        self._get_dummy_bias()
+        if x is None and (out_bvr is not None and scales is not None):
+            return _rtn_sbvr_1xtN_mm_T(
+                l_bvr = out_bvr,
+                l_scales = scales,
+                r_bvr = self.bvr,
+                r_coeff_idx = self.coeff_idx,
+                r_coeff_cache = self.coeff_cache,
+                bias = self._get_dummy_bias(),
+                nRTN = self._get_rtn_bits()
+            )
+        elif x is not None and (out_bvr is None or scales is None):
+            return _fused_rtn_sbvr_1xtN_mm_T(
+                x = x,
+                r_bvr = self.bvr,
+                r_coeff_idx = self.coeff_idx,
+                r_coeff_cache = self.coeff_cache,
+                bias = self._get_dummy_bias(),
+                nRTN = self._get_rtn_bits()
+            )
+        else:
+            raise ValueError(
+                r_str("Either provide x or out_bvr and scales, but not both")
+            )
+            
+    @torch.inference_mode()
+    def debug_forward(self, x):
+        self._get_dummy_bias()
+        if not hasattr(self, "restored_w"):
+            print(b_str("Restoring weights from SBVR object..."))
+            self.restored_w = self.decode().T
+        return x @ self.restored_w
+
 def mm_T(lhs, rhs, bias):
     lhs_bvr = lhs.bvr
     lhs_coeff_idx = lhs.coeff_idx

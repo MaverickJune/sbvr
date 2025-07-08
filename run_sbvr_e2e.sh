@@ -14,11 +14,11 @@
 
 python -m sbvr_e2e \
     --root_sbvr_path "/home/nxclab/wonjun/sbvr/quantized_model/meta-llama_Llama-3.2-1B_4_16_16" \
-    --sbvrizer_path "/home/nxclab/wonjun/sbvr/input_profile/meta-llama_Llama-3.2-1B_4_16_16/per_state_encoding" \
     --input_model "meta-llama/Llama-3.2-1B" \
     --weight_bvr_len 128 \
     --weight_num_sums 4 \
-    --input_bvr_len 128 \
-    --input_num_sums 8 \
-    --input_set_size 4 \
-    --measure_ppl
+    --rtn_group_size 128 \
+    --rtn_bits 7 \
+    --measure_latency \
+    # --measure_ppl \
+    

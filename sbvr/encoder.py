@@ -29,6 +29,10 @@ class sbvr_encoder():
         self.compute_dtype = kwargs.get("compute_dtype", torch.float16)
         self.enable_blockwise_gptq = kwargs.get("enable_blockwise_gptq", False)
         
+        # for input sbvrization
+        self.rtn_bits = kwargs.get("rtn_bits", 7)
+        self.rtn_group_size = kwargs.get("rtn_group_size", 128)
+        
     def _get_conf_str(self):
         conf_str = g_str("SBVR Encoder Config:") + \
             y_str("\n\tNumber of Summations: ") + str(self.num_sums) + \
