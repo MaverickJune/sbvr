@@ -88,6 +88,7 @@ def measure_multiple_operators(model, layer_idx=0, view=False):
     mlp = layer.mlp
 
     h = torch.randn(1, 1, layer.hidden_size, device="cuda:0", dtype=torch.float16)
+    h_raw = h
     
     if view:
         qkv_gemv = SbvrGemvModule(
@@ -103,7 +104,7 @@ def measure_multiple_operators(model, layer_idx=0, view=False):
     # Measure each in μs
     results = {
         'qkv_linear': perf_timing(qkv, h, device),
-        'mlp':       perf_timing(mlp,  h, device),
+        'mlp':       perf_timing(mlp,  h_raw, device),
     }
     return results
 
@@ -114,15 +115,10 @@ def main():
     print(f"Running on device: {device}\n")
 
     # Model paths
-    base_model      = "meta-llama/Llama-3.2-1B"
-    root_sbvr_path  = "/home/nxclab/wonjun/sbvr/quantized_model/meta-llama_Llama-3.2-1B_4_16_16_old"
+    base_model      = "meta-llama/Llama-3.2-3B"
+    root_sbvr_path  = "/home/nxclab/wonjun/sbvr/quantized_model/meta-llama_Llama-3.2-3B_4_16_16"
     layer_to_test   = 0
 
-    # Torch baseline
-    print("Loading standard FP16 Torch model...")
-    mdl_torch = AutoModelForCausalLM.from_pretrained(
-        base_model, torch_dtype=torch.float16, low_cpu_mem_usage=True
-    ).to(device)
 
     # SBVR model init
     print("\nInitializing SBVR model...")
@@ -164,38 +160,32 @@ def main():
 
     # Measure
     print("\nMeasuring Torch GEMV projections...")
-    metrics_torch = measure_layer_components(mdl_torch, layer_to_test)
 
     print("Measuring SBVR GEMV projections...")
     metrics_sbvr = measure_layer_components(model_sbvr, layer_to_test, True)
 
     # Compare
     print("\nComparison (μs):")
-    header = f"{'Component':<15s}{'Torch':>12s}{'SBVR':>12s}{'Δ(μs)':>12s}"
+    header = f"{'Component':<15s}{'SBVR':>12s}"
     print(header)
     print('-' * len(header))
     for comp in ['q_proj_us','k_proj_us','gate_proj_us','down_proj_us']:
-        t = metrics_torch[comp]
         s = metrics_sbvr[comp]
-        delta = s - t
-        print(f"{comp:<15s}{t:12.2f}{s:12.2f}{delta:12.2f}")
+        print(f"{comp:<15s}{s:12.2f}")
 
 
     # Measure multiple operators
     print("\nMeasuring multiple operators...")
-    metrics_multi_torch = measure_multiple_operators(mdl_torch, layer_to_test)
     metrics_multi_sbvr = measure_multiple_operators(model_sbvr, layer_to_test, True)
 
     # Compare multiple operators
     print("\nComparison of multiple operators (μs):")
-    header_multi = f"{'Operator':<15s}{'Torch':>12s}{'SBVR':>12s}{'Δ(μs)':>12s}"
+    header_multi = f"{'Operator':<15s}{'SBVR':>12s}"
     print(header_multi)
     print('-' * len(header_multi))
     for op in ['qkv_linear', 'mlp']:
-        t = metrics_multi_torch[op]
         s = metrics_multi_sbvr[op]
-        delta = s - t
-        print(f"{op:<15s}{t:12.2f}{s:12.2f}{delta:12.2f}")
+        print(f"{op:<15s}{s:12.2f}")
     
 
     

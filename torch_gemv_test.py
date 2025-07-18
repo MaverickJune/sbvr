@@ -1,7 +1,7 @@
 import time
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from awq import AutoAWQForCausalLM  # adjust import path if needed
+import argparse
 
 def perf_timing(fn, x, device, runs=500):
     """
@@ -108,10 +108,17 @@ def main():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Running on device: {device}\n")
 
-    # 1) Define model names/paths
-    base_model    = "meta-llama/Llama-3.2-1B"
-    quant_path    = "Llama-3.2-1B-AWQ-gemv"
-    layer_to_test = 0
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--size", "-s", type=str, choices=["1B", "3B", "8B"], required=True,
+                        help="Model size to load (1B, 3B, or 8B)")
+    args = parser.parse_args()
+
+    model_paths = {
+        "1B": "meta-llama/Llama-3.2-1B",
+        "3B": "meta-llama/Llama-3.2-3B",
+        "8B": "meta-llama/Llama-3.1-8B"
+    }
+    base_model = model_paths[args.size]
 
     # 2) Load standard FP16 Torch model
     print("Loading standard FP16 model...")
@@ -121,51 +128,33 @@ def main():
         low_cpu_mem_usage=True
     ).to(device)
 
-    # 3) Load AWQ-quantized model
-    print("Loading AWQ-quantized model...")
-    mdl_awq = AutoAWQForCausalLM.from_quantized(
-        quant_path,
-        torch_dtype=torch.float16,
-        low_cpu_mem_usage=True,
-        device_map="auto",
-        trust_remote_code=True,
-        fuse_layers=False
-    ).to(device)
-
     # 4) Measure components on both models
     print("\nMeasuring Torch baseline projections...")
-    metrics_torch = measure_layer_components(mdl_torch, layer_to_test)
+    metrics_torch = measure_layer_components(mdl_torch, 0)
 
-    print("\nMeasuring AWQ projections...")
-    metrics_awq   = measure_layer_components(mdl_awq, layer_to_test)
 
     # 5) Compare results in microseconds
     print("\nProjection comparison (µs):")
-    header = f"{'Component':<15s}{'Torch':>12s}{'AWQ':>12s}{'Δ(µs)':>12s}"
+    header = f"{'Component':<15s}{'Torch':>12s}"
     print(header)
     print("-" * len(header))
     for comp in ["q_proj_us", "k_proj_us", "gate_proj_us", "down_proj_us"]:
         t = metrics_torch[comp]
-        a = metrics_awq[comp]
-        delta = a - t
-        print(f"{comp:<15s}{t:12.2f}{a:12.2f}{delta:12.2f}")
+        print(f"{comp:<15s}{t:12.2f}")
 
 
     # Measure multiple operators
     print("\nMeasuring multiple operators...")
-    metrics_multi_torch = measure_multiple_operators(mdl_torch, layer_to_test)
-    metrics_multi_awq   = measure_multiple_operators(mdl_awq, layer_to_test)
+    metrics_multi_torch = measure_multiple_operators(mdl_torch, 0)
 
     # Compare multiple operators
     print("\nComparison of multiple operators (μs):")
-    header_multi = f"{'Operator':<15s}{'Torch':>12s}{'AWQ':>12s}{'Δ(μs)':>12s}"
+    header_multi = f"{'Operator':<15s}{'Torch':>12s}"
     print(header_multi)
     print('-' * len(header_multi))
     for op in ['qkv_linear', 'mlp']:
         t = metrics_multi_torch[op]
-        s = metrics_multi_awq[op]
-        delta = s - t
-        print(f"{op:<15s}{t:12.2f}{s:12.2f}{delta:12.2f}")
+        print(f"{op:<15s}{t:12.2f}")
 
 if __name__ == "__main__":
     main()

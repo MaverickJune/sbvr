@@ -7,7 +7,8 @@ import os
 
 def compute_perplexity(model, tokenizer, dataset_name, dataset_config,
                        split="validation", max_length=4096, stride=512,
-                       num_examples=10000):
+                       num_examples=10000,
+                       device="cuda:0"):
     model.eval()
     model.to("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Computing perplexity on {dataset_name} (config: {dataset_config}), "
@@ -144,12 +145,19 @@ def compute_perplexity(model, tokenizer, dataset_name, dataset_config,
         # Or, ensure target_chunk is appropriately formed if model doesn't shift.
         # For models like GPT-2, input_ids are used as labels directly.
         target_chunk_labels = input_chunk.clone()
-
-
-        input_chunk_batch = input_chunk.unsqueeze(0).to(model.device)
-        target_chunk_labels_batch = target_chunk_labels.unsqueeze(0).to(model.device)
-
-        vocab_size = model.get_input_embeddings().num_embeddings
+        
+        # if model does not have atrribute device, use default device
+        if not hasattr(model, 'device'):
+            input_chunk_batch = input_chunk.unsqueeze(0).to(device)
+            target_chunk_labels_batch = target_chunk_labels.unsqueeze(0).to(device)
+        else:
+            input_chunk_batch = input_chunk.unsqueeze(0).to(model.device)
+            target_chunk_labels_batch = target_chunk_labels.unsqueeze(0).to(model.device)
+            
+        if not hasattr(model, 'get_input_embeddings'):
+            vocab_size = model.config.vocab_size
+        else:
+            vocab_size = model.get_input_embeddings().num_embeddings
         if input_chunk_batch.max() >= vocab_size:
             invalid_ids = input_chunk_batch[input_chunk_batch >= vocab_size]
             raise ValueError(
@@ -181,7 +189,7 @@ def compute_perplexity(model, tokenizer, dataset_name, dataset_config,
     return ppl.item()
 
 
-def evaluate_ppl(model, tokenizer):
+def evaluate_ppl(model, tokenizer, device="cuda:0"):
     datasets = {
         "wikitext": ("wikitext", "wikitext-2-raw-v1", "validation"),
         # "ptb": ("ptb_text_only", "penn_treebank", "test"),
@@ -199,7 +207,8 @@ def evaluate_ppl(model, tokenizer):
             split=split,
             max_length=min(2048, model.config.max_position_embeddings),
             stride=512, # 512 was the original value
-            num_examples=3600 if name == "c4" else None  # subset only for c4
+            num_examples=3600 if name == "c4" else None,  # subset only for c4,
+            device=device
         )
         print(f"{name}: {ppl:.2f}")
         scores[name] = ppl

@@ -36,19 +36,32 @@ def fuse_ln_linear(
             linear.bias.data = linear.bias.data.to(linear_dtype)
 
 
-def fuse_layer_norms(model):
+def fuse_layer_norms(model, eff_multi_gpu: bool = False):
     kwargs = {"model": model}
     print("\tFusing layer norms...")
     # Embedding fusion
     for W in [model.model.embed_tokens]:
-        W_ = W.weight.data.double()
-        W.weight.data = (W_ - W_.mean(dim=-1, keepdim=True)).to(W.weight.data.dtype)
+        device_orig = W.weight.data.device
+        if not eff_multi_gpu:
+            W_ = W.weight.data.double()
+            W.weight.data = (W_ - W_.mean(dim=-1, keepdim=True)).to(W.weight.data.dtype)
+        else:
+            # Move the weight to GPU for fusing
+            W_ = W.weight.data.to("cuda:0").double()
+            W.weight.data = (W_ - W_.mean(dim=-1, keepdim=True)).to(W.weight.data.dtype)
+            # Move the weight back to original device
+            W.weight.data = W.weight.data.to(device_orig)
 
     layers = [layer for layer in model.model.layers]
 
     # Fuse the linear operations in Layernorm into the adjacent linear blocks.
     for layer in layers:
         # fuse the input layernorms into the linear layers
+        
+        if eff_multi_gpu:
+            # Move the layer to GPU for fusing
+            layer = layer.to("cuda:0")
+        
         fuse_ln_linear(
             layer.post_attention_layernorm, [layer.mlp.up_proj, layer.mlp.gate_proj]
         )
@@ -60,15 +73,26 @@ def fuse_layer_norms(model):
                 layer.self_attn.v_proj,
             ],
         )
+        if eff_multi_gpu:
+            # Move the layer back to CPU after fusing
+            layer = layer.to("cpu")
 
         W_norm = layer.post_attention_layernorm.weight.data
         layer.post_attention_layernorm.weight.data = torch.ones_like(W_norm)
         W_norm = layer.input_layernorm.weight.data
         layer.input_layernorm.weight.data = torch.ones_like(W_norm)
-
+        
+    if eff_multi_gpu:
+        # Move the model to GPU for fusing the final layernorm
+        model.model.norm = model.model.norm.to("cuda:0")
+        model.lm_head = model.lm_head.to("cuda:0")
     fuse_ln_linear(
         model.model.norm,
         [model.lm_head],
     )
+    if eff_multi_gpu:
+        # Move the model back to CPU after fusing
+        model.model.norm = model.model.norm.to("cpu")
+        model.lm_head = model.lm_head.to("cpu")
     W_norm = model.model.norm.weight.data
     model.model.norm.weight.data = torch.ones_like(W_norm)

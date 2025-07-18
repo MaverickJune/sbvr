@@ -1,11 +1,21 @@
 import torch
 import argparse
-from eval_utils.modelling_llama_sbvr import LlamaForSbvrLM
+from eval_utils.modeling_llama_sbvr import LlamaForSbvrLM
+from eval_utils.modeling_qwen3_sbvr import Qwen3ForSbvrLM
 from transformers import AutoTokenizer, AutoConfig, LlamaTokenizerFast
 from sbvr_e2e_utils.eval_ppl import r_str, g_str, y_str, b_str
 from paper_eval_package.ppl_benchmark import evaluate_ppl
 from paper_eval_package.latency_benchmark import evaluate_latency
+from paper_eval_package.commonqa_benchmark import evaluate_commonqa, get_dataset_configs
 from sbvr_e2e_utils.utils import get_partial_state
+
+# for CUDA graph
+from transformers import GenerationConfig
+import contextlib
+from transformers.cache_utils import StaticCache
+# from cudagraph_utils import attach_cudagraph_generate
+
+import sys
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -31,6 +41,10 @@ def parse_args():
                         help="whether to measure the ppl of the model")
     parser.add_argument("--measure_latency", action="store_true",
                         help="whether to measure the latency of the model")
+    parser.add_argument("--measure_commonqa", action="store_true",
+                        help="whether to measure the commonqa of the model")
+    # parser.add_argument("--test_cudagraph", action="store_true",
+    #                     help="whether to test cudagraph")
     args = parser.parse_args()
     
     return args
@@ -42,28 +56,45 @@ def main():
     if args.root_sbvr_path is None and args.load_qmodel_path is None:
         raise ValueError("Either root_sbvr_path or load_qmodel_path must be provided")
     
-    filtered_state = get_partial_state(args)
-    
-    sbvr_state_dict = {
-        "weight_bvr_len": args.weight_bvr_len,
-        "weight_num_sums": args.weight_num_sums,
-        "rtn_group_size": args.rtn_group_size,
-        "rtn_bits": args.rtn_bits,
-    }
-    config = AutoConfig.from_pretrained(args.input_model)
-    
-    # Llama v3.2 specific: Spinquant is not compatiable with tie_word_embeddings, 
-    # clone lm_head from embed_tokens
-    process_word_embeddings = False
-    if config.tie_word_embeddings:
-        config.tie_word_embeddings = False
-        process_word_embeddings = True
+    if args.load_qmodel_path is None:
+        # config setups
+        filtered_state = get_partial_state(args)
+        
+        sbvr_state_dict = {
+            "weight_bvr_len": args.weight_bvr_len,
+            "weight_num_sums": args.weight_num_sums,
+            "rtn_group_size": args.rtn_group_size,
+            "rtn_bits": args.rtn_bits,
+        }
+        config = AutoConfig.from_pretrained(args.input_model)
+        
+        # Llama v3.2 specific: Spinquant is not compatiable with tie_word_embeddings, 
+        # clone lm_head from embed_tokens
+        process_word_embeddings = False
+        if config.tie_word_embeddings:
+            config.tie_word_embeddings = False
+            process_word_embeddings = True
     
     # prepare the model
     if args.load_qmodel_path is not None:
-        raise NotImplementedError("Loading quantized model is not supported yet")
+        if "Llama" in args.input_model:
+            model = LlamaForSbvrLM.from_pretrained(
+                args.load_qmodel_path,
+                torch_dtype="auto"
+            )
+        elif "Qwen3" in args.input_model:
+            model = Qwen3ForSbvrLM.from_pretrained(
+                args.load_qmodel_path,
+                torch_dtype="auto"
+            )
     else:
-        model = LlamaForSbvrLM(config=config, sbvr_state_dict=sbvr_state_dict)
+        if "Llama" in args.input_model:
+            model = LlamaForSbvrLM(config=config, sbvr_state_dict=sbvr_state_dict)
+        elif "Qwen3" in args.input_model:
+            model = Qwen3ForSbvrLM(config=config, sbvr_state_dict=sbvr_state_dict)
+        else:
+            print(args.input_model)
+            raise ValueError(f"Unsupported model type: {args.input_model}")
         
         # fill partial state
         missing, unexpected = model.load_state_dict(
@@ -78,40 +109,55 @@ def main():
         model.load_sbvr_weights(args.root_sbvr_path)
         
         # convert the model to float16
-        model.convert_model_dtype(dtype=torch.float16)
+        model.convert_model_dtype(dtype=torch.bfloat16)
         model.preprocess_model()
         model = model.to("cuda:0")
         model.eval()
     print(b_str("Model loaded"))
+    print(b_str(f"attn_implementation: {model.config._attn_implementation}"))
+    # sys.exit(0)
         
-    tokenizer = LlamaTokenizerFast.from_pretrained(
+    # tokenizer = AutoTokenizer.from_pretrained(
+    #     pretrained_model_name_or_path=args.input_model,
+    #     cache_dir=None,
+    #     padding_side="right",
+    #     use_fast=True,
+    #     add_eos_token=False,
+    #     add_bos_token=False,
+    # )
+    tokenizer = AutoTokenizer.from_pretrained(
         pretrained_model_name_or_path=args.input_model,
-        cache_dir=None,
-        model_max_length=2048,
         padding_side="right",
         use_fast=True,
-        add_eos_token=False,
-        add_bos_token=False,
     )
 
-    for layer_idx in range(6, 7):
-        target_layer = model.model.layers[layer_idx]
+    # for layer_idx in range(6, 7):
+    #     target_layer = model.model.layers[layer_idx]
 
-        mlp_module = target_layer.mlp
-        sbvr_module = target_layer.mlp.down_proj
-        hidden_dim = mlp_module.hidden_size * 4
-        print(f"hidden_dim: {hidden_dim}")
+    #     mlp_module = target_layer.mlp
+    #     sbvr_module = target_layer.mlp.down_proj
+    #     hidden_dim = mlp_module.hidden_size * 4
+    #     print(f"hidden_dim: {hidden_dim}")
 
-        dummy_x = torch.randn(1, 1, hidden_dim, device="cuda:0", dtype=torch.float16)
-        dummy_x_flat = dummy_x.view(1, -1)  # (seq_len, hidden_dim) = (1, hidden_dim)
+    #     dummy_x = torch.randn(1, 1, hidden_dim, device="cuda:0", dtype=torch.float16)
+    #     dummy_x_flat = dummy_x.view(1, -1)  # (seq_len, hidden_dim) = (1, hidden_dim)
 
-        try:
-            with torch.no_grad():
-                out = sbvr_module.d_forward(dummy_x_flat)
-            print(f"Layer {layer_idx} output shape: {out.shape}")
-        except Exception as e:
-            print(f"[Layer {layer_idx}] Error: {e}")
-            continue
+    #     try:
+    #         with torch.no_grad():
+    #             out = sbvr_module.d_forward(dummy_x_flat)
+    #         print(f"Layer {layer_idx} output shape: {out.shape}")
+    #     except Exception as e:
+    #         print(f"[Layer {layer_idx}] Error: {e}")
+    #         continue
+        
+    if args.save_qmodel_path:
+        print(b_str("Saving the quantized model..."))
+        model.save_pretrained(
+            args.save_qmodel_path,
+            safe_serialization=False,
+            max_shard_size="4GB",
+        )
+        tokenizer.save_pretrained(args.save_qmodel_path)
         
     if args.measure_ppl:
         ppl = evaluate_ppl(
@@ -124,6 +170,24 @@ def main():
             model=model,
             tokenizer=tokenizer
         )
+    
+    if args.measure_commonqa:
+        NUM_SAMPLES_PER_DATASET = 200
+        dataset_configs = get_dataset_configs()
+        evaluate_commonqa(
+            model=model,
+            tokenizer=tokenizer,
+            dataset_configs=dataset_configs,
+            num_samples_per_dataset=NUM_SAMPLES_PER_DATASET
+        )
+        print(g_str("CommonQA evaluation completed"))
+        
+    # if args.test_cudagraph:
+    #     attach_cudagraph_generate(model, tokenizer,device="cuda", dtype=torch.float16)
+    #     latency_result = evaluate_latency(
+    #         model=model,
+    #         tokenizer=tokenizer
+    #     )
         
 if __name__ == "__main__":
     main()

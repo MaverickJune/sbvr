@@ -162,6 +162,8 @@ def evaluate_single_dataset(
     print(f"  Using plain prompt format (assuming base model).")
     # ... (initial prints for dataset ID, model/tokenizer EOS/PAD IDs)
 
+    print("num_samples:", num_samples)
+
     try:
         dataset = load_dataset(
             config.hf_id,
@@ -363,6 +365,7 @@ def evaluate_commonqa(
     print(f"Final Model Config after setup: EOS ID: {model.config.eos_token_id}, PAD ID: {model.config.pad_token_id}")
 
     all_results = []
+    print("num_samples_per_dataset:", num_samples_per_dataset)
     for config_obj in dataset_configs:
         result = evaluate_single_dataset(
             model,
@@ -443,6 +446,8 @@ if __name__ == "__main__":
                 item['choices']['label'].index(str(item['answerKey']))
         )
     ]
+
+    print("num_samples_per_dataset:", NUM_SAMPLES_PER_DATASET)
     evaluate_commonqa(
         model=loaded_model,
         tokenizer=loaded_tokenizer,

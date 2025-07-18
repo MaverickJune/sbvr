@@ -358,6 +358,13 @@ class LlamaSbvrMLP(nn.Module):
             verbose_level=1
         )
         self.act_fn = ACT2FN[config.hidden_act]
+        self.had_K, self.K = hadamard_utils.get_hadK(self.intermediate_size)
+        # print(f"self.K: {self.K}")
+        # print(f"hadamard device: {self.had_K.device}")
+        # sys.exit(0)
+
+        if self.had_K is not None:
+            self.had_K = self.had_K.to("cuda:0")
 
     def forward(self, x, debug_mode=False):
         if self.config.pretraining_tp > 1:
@@ -366,8 +373,9 @@ class LlamaSbvrMLP(nn.Module):
             # debug mode: Restore weights and run the forward pass
             if debug_mode:
                 x = self.act_fn(self.gate_proj.debug_forward(x)) * self.up_proj.debug_forward(x)
-                had_K, K = hadamard_utils.get_hadK(self.intermediate_size)
-                x = hadamard_utils.matmul_hadU_cuda(x, had_K, K)
+                # had_K, K = hadamard_utils.get_hadK(self.intermediate_size)
+                # x = hadamard_utils.matmul_hadU_cuda(x, had_K, K)
+                x = hadamard_utils.matmul_hadU_cuda(x, self.had_K, self.K)
                 x = self.down_proj.debug_forward(x)
                 return x
         
@@ -377,16 +385,18 @@ class LlamaSbvrMLP(nn.Module):
                 # prefill stage or multiple tokens, GEMM
                 x = x.view(seq_len, -1)
                 x = self.act_fn(self.gate_proj.p_forward(x)) * self.up_proj.p_forward(x)
-                had_K, K = hadamard_utils.get_hadK(self.intermediate_size)
-                x = hadamard_utils.matmul_hadU_cuda(x, had_K, K)
+                # had_K, K = hadamard_utils.get_hadK(self.intermediate_size)
+                # x = hadamard_utils.matmul_hadU_cuda(x, had_K, K)
+                x = hadamard_utils.matmul_hadU_cuda(x, self.had_K, self.K)
                 x = self.down_proj.p_forward(x)   
             else:
                 # decode stage or single token, GEMV
                 x = x.view(-1, x.shape[-1])
                 out_bvr, scales = _sbvr_input_transfrom(x, nRTN=self.rtn_bits, group_size=self.rtn_group_size)
                 x = self.act_fn(self.gate_proj.d_forward(out_bvr=out_bvr, scales=scales)) * self.up_proj.d_forward(out_bvr=out_bvr, scales=scales)
-                had_K, K = hadamard_utils.get_hadK(self.intermediate_size)
-                x = hadamard_utils.matmul_hadU_cuda(x, had_K, K)
+                # had_K, K = hadamard_utils.get_hadK(self.intermediate_size)
+                # x = hadamard_utils.matmul_hadU_cuda(x, had_K, K)
+                x = hadamard_utils.matmul_hadU_cuda(x, self.had_K, self.K)
                 x = self.down_proj.d_forward(x)
             # reshape the output
             x = x.view(bsz, seq_len, -1)
@@ -466,6 +476,9 @@ class LlamaSbvrAttention(nn.Module):
         
         self.rtn_bits = config.rtn_bits
         self.rtn_group_size = config.rtn_group_size
+        
+        # print(f"rtn_bits: {self.rtn_bits}, rtn_group_size: {self.rtn_group_size}")
+        # sys.exit(0)
 
         self.q_proj = sbvr.sbvr(
             encoder_config={
@@ -1391,20 +1404,27 @@ class LlamaForSbvrLM(LlamaPreTrainedModel):
     def __init__(self, config, sbvr_state_dict=None):
         super().__init__(config)
         
-        if sbvr_state_dict is None:
-            raise ValueError("sbvr_state_dict must be provided")
-        weight_bvr_len = sbvr_state_dict["weight_bvr_len"]
-        weight_num_sums = sbvr_state_dict["weight_num_sums"]
-        rtn_group_size = sbvr_state_dict["rtn_group_size"]
-        rtn_bits = sbvr_state_dict["rtn_bits"]
-        root_sbvr_path = sbvr_state_dict.get("root_sbvr_path", None)
-        
-        # write them down to the config
-        config.weight_bvr_len = weight_bvr_len
-        config.weight_num_sums = weight_num_sums
-        config.rtn_group_size = rtn_group_size
-        config.rtn_bits = rtn_bits
-        config.root_sbvr_path = root_sbvr_path # can be None if not provided
+        if sbvr_state_dict is not None:
+            # raise ValueError("sbvr_state_dict must be provided")
+            weight_bvr_len = sbvr_state_dict["weight_bvr_len"]
+            weight_num_sums = sbvr_state_dict["weight_num_sums"]
+            rtn_group_size = sbvr_state_dict["rtn_group_size"]
+            rtn_bits = sbvr_state_dict["rtn_bits"]
+            root_sbvr_path = sbvr_state_dict.get("root_sbvr_path", None)
+            
+            # write them down to the config
+            config.weight_bvr_len = weight_bvr_len
+            config.weight_num_sums = weight_num_sums
+            config.rtn_group_size = rtn_group_size
+            config.rtn_bits = rtn_bits
+            config.root_sbvr_path = root_sbvr_path # can be None if not provided
+            
+            self.weight_bvr_len = weight_bvr_len
+            self.weight_num_sums = weight_num_sums
+            self.rtn_group_size = rtn_group_size
+            self.rtn_bits = rtn_bits
+        else:
+            print(f"loading model from pretrained")
         
         self.model = LlamaSbvrModel(config)
         self.vocab_size = config.vocab_size
@@ -1430,14 +1450,26 @@ class LlamaForSbvrLM(LlamaPreTrainedModel):
             sbvr_down_proj_path = os.path.join(root_sbvr_path, f"sbvr_layer_{layer_idx}_mlp.down_proj.module.pt")
             
             layer.self_attn.q_proj = sbvr.load(sbvr_q_proj_path)
+            layer.self_attn.q_proj._set_rtn_bits(self.rtn_bits)
+            
             layer.self_attn.k_proj = sbvr.load(sbvr_k_proj_path)
+            layer.self_attn.k_proj._set_rtn_bits(self.rtn_bits)
+            
             layer.self_attn.v_proj = sbvr.load(sbvr_v_proj_path)
+            layer.self_attn.v_proj._set_rtn_bits(self.rtn_bits)
+            
             layer.self_attn.o_proj = sbvr.load(sbvr_o_proj_path)
+            layer.self_attn.o_proj._set_rtn_bits(self.rtn_bits)
             
             layer.mlp.up_proj = sbvr.load(sbvr_up_proj_path)
-            layer.mlp.gate_proj = sbvr.load(sbvr_gate_proj_path)
-            layer.mlp.down_proj = sbvr.load(sbvr_down_proj_path)
+            layer.mlp.up_proj._set_rtn_bits(self.rtn_bits)
             
+            layer.mlp.gate_proj = sbvr.load(sbvr_gate_proj_path)
+            layer.mlp.gate_proj._set_rtn_bits(self.rtn_bits)
+
+            layer.mlp.down_proj = sbvr.load(sbvr_down_proj_path)
+            layer.mlp.down_proj._set_rtn_bits(self.rtn_bits)
+
         print(f"Loaded SBVR weights from {root_sbvr_path}")
 
     def get_input_embeddings(self):
