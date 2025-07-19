@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import itertools
 import math
 import numpy as np
@@ -23,6 +24,7 @@ class sbvr(torch.nn.Module):
                 else torch.device("cpu")
         self.verbose_level = verbose_level
         # self._get_dummy_bias()
+
         
         if data is not None and serialized is not None:
             raise ValueError(
@@ -63,6 +65,10 @@ class sbvr(torch.nn.Module):
             self.rtn_bits = self.encoder.rtn_bits
             self.rtn_group_size = self.encoder.rtn_group_size
             
+            # print(f"rtn_bits: {self.rtn_bits}")
+            # print(f"rtn_group_size: {self.rtn_group_size}")
+            # sys.exit(0)
+            
             self.enable_blockwise_gptq = self.encoder.enable_blockwise_gptq
             
             if self.num_sums > 11 and self.compute_dtype == torch.float16:
@@ -79,6 +85,29 @@ class sbvr(torch.nn.Module):
             self.bvr = None
             self.coeff_idx = None
             self.coeff_cache = None
+            
+             # ---- 2. register the pre-hook -----------------------------------
+            def _swap_in_real_tensors(module, state_dict, prefix, *unused):
+                """
+                Replace the placeholder attributes with the real tensors
+                found in `state_dict`, so the default loader sees no mismatch.
+                """
+                for name in ("bvr", "coeff_idx", "coeff_cache"):
+                    key = prefix + name
+                    if key in state_dict:
+                        tensor = state_dict.pop(key)          # remove from dict
+                        param  = nn.Parameter(tensor,
+                                            requires_grad=False)
+                        setattr(module, name, param)          # registers it
+
+            # `with_module=True` → hook receives `module` as first arg
+            self.register_load_state_dict_pre_hook(_swap_in_real_tensors)
+            
+            # # fix, for model loading compatibility
+            # self.register_buffer("bvr", torch.empty(0, dtype=self.bvr_dtype))
+            # self.register_buffer("coeff_idx", torch.empty(0, dtype=torch.uint16))
+            # self.register_buffer("coeff_cache", torch.empty(0, dtype=self.compute_dtype))
+            
             self.input_coeff = None
             
             # self._get_dummy_bias()
@@ -128,6 +157,10 @@ class sbvr(torch.nn.Module):
         '''
         Get the number of bits for the rtn encoding of input
         '''
+        # print(f"rtn_bits: {self.rtn_bits}")
+        # print("reached here")
+        # sys.exit(0)
+        
         if not hasattr(self, 'rtn_bits'):
             self.rtn_bits = 7
         return self.rtn_bits

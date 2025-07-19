@@ -80,12 +80,14 @@ def main():
         if "Llama" in args.input_model:
             model = LlamaForSbvrLM.from_pretrained(
                 args.load_qmodel_path,
-                torch_dtype="auto"
+                torch_dtype="auto",
+                low_cpu_mem_usage=False
             )
         elif "Qwen3" in args.input_model:
             model = Qwen3ForSbvrLM.from_pretrained(
                 args.load_qmodel_path,
-                torch_dtype="auto"
+                torch_dtype="auto",
+                low_cpu_mem_usage=False
             )
     else:
         if "Llama" in args.input_model:
@@ -109,7 +111,7 @@ def main():
         model.load_sbvr_weights(args.root_sbvr_path)
         
         # convert the model to float16
-        model.convert_model_dtype(dtype=torch.bfloat16)
+        model.convert_model_dtype(dtype=torch.float16)
         model.preprocess_model()
         model = model.to("cuda:0")
         model.eval()

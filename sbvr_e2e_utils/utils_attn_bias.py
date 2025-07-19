@@ -79,7 +79,6 @@ def get_partial_state(args):
                 "self_attn" not in k           # self_attn 이 아닌 나머지
                 or "q_norm" in k               # q_norm 은 예외적으로 포함
                 or "k_norm" in k               # k_norm 도 예외적으로 포함
-                or k.endswith("bias")  # bias 는 예외적으로 포함
             )
         )
     }
