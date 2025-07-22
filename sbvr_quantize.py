@@ -6,8 +6,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from transformers import LlamaTokenizerFast
 import transformers
-from eval_utils.modeling_llama import LlamaForCausalLM
-from eval_utils.modeling_qwen3 import Qwen3ForCausalLM
+from transformers import AutoModelForCausalLM, AutoConfig
 from utils import data_utils, eval_utils, utils
 from utils.process_args import process_args_ptq
 from utils.model_utils import capture_layer_io, get_layer_io_save_path
@@ -30,16 +29,15 @@ def sbvr_spinquant_proess() -> None:
     if config.tie_word_embeddings:
         config.tie_word_embeddings = False
         process_word_embeddings = True
-    dtype = torch.bfloat16 if training_args.bf16 else torch.float16
     
-        
     config._attn_implementation = "sdpa"
     
     # load the model onto CPU
-    model = Qwen3ForCausalLM.from_pretrained(
+
+    model = AutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=model_args.input_model,
         config=config,
-        torch_dtype=dtype,
+        torch_dtype="auto",
         device_map="cpu",
         low_cpu_mem_usage=True
     ).eval()

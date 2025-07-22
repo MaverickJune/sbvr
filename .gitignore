@@ -1,6 +1,5 @@
 uv_venv/
-fast-hadamard-transform/
-quantized_model/
+quantized_*/
 .vscode/
 build/
 *__pycache__/

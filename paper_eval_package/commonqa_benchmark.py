@@ -156,13 +156,11 @@ def evaluate_single_dataset(
     tokenizer,
     config: DatasetTaskConfig,
     device: torch.device,
-    num_samples: Optional[int] = None
+    num_samples: Optional[int] = None,
+    disable_think: bool = False
 ) -> Dict[str, Any]:
     print(f"\n--- Evaluating on: {config.name} ---")
     print(f"  Using plain prompt format (assuming base model).")
-    # ... (initial prints for dataset ID, model/tokenizer EOS/PAD IDs)
-
-    print("num_samples:", num_samples)
 
     try:
         dataset = load_dataset(
@@ -175,9 +173,7 @@ def evaluate_single_dataset(
         print(f"  Error loading dataset {config.name}: {e}")
         return {"error": str(e), "accuracy": 0.0}
 
-    # ... (dataset subsetting logic remains same) ...
-    if num_samples is not None and num_samples > 0 \
-       and num_samples < len(dataset):
+    if num_samples is not None and 0 < num_samples < len(dataset):
         dataset = dataset.select(range(num_samples))
         print(f"  Evaluating on a subset of {num_samples} samples.")
     else:
@@ -190,32 +186,30 @@ def evaluate_single_dataset(
     debug_samples_output = []
 
     for i, item in enumerate(tqdm(dataset, desc=f"Processing {config.name}")):
-        if callable(config.question_field):
-            question_text = config.question_field(item)
-        else:
-            question_text = item[config.question_field]
-
-        if callable(config.choices_field):
-            choice_texts = config.choices_field(item)
-        else:
-            choice_texts = item[config.choices_field]
-
+        question_text = (config.question_field(item)
+                         if callable(config.question_field)
+                         else item[config.question_field])
+        choice_texts = (config.choices_field(item)
+                        if callable(config.choices_field)
+                        else item[config.choices_field])
         current_prompt_labels = config.prompt_choice_labels or \
                                 DEFAULT_CHOICE_LABELS[:len(choice_texts)]
 
-        # Use the direct prompt format suitable for base models
-        direct_prompt = format_prompt_for_model( # Using the renamed function
+        # Build direct prompt and optionally append <think> tags
+        direct_prompt = format_prompt_for_model(
             question_text,
             choice_texts,
             current_prompt_labels
         )
-        
+        if disable_think:
+            direct_prompt += "\n<think>\n\n</think>\n\n"
+
         inputs = tokenizer(
-            direct_prompt, # Pass the direct prompt string
+            direct_prompt,
             return_tensors="pt",
             padding=False,
             truncation=True,
-            max_length=config.max_input_length 
+            max_length=config.max_input_length
         ).to(device)
 
         with torch.no_grad():
@@ -226,26 +220,26 @@ def evaluate_single_dataset(
                 device=device,
                 max_new_tokens=config.max_new_tokens,
             )
-        
+
         input_len = inputs["input_ids"].shape[1]
         generated_ids_for_decode = outputs[0, input_len:]
-        
+
         if i < N_DEBUG_SAMPLES:
             print(f"\n    --- Token Debug for Sample {i+1} ({config.name}) ---")
             print(f"    Formatted Prompt (Direct for Base Model):\n\"\"\"\n{direct_prompt}\n\"\"\"")
-            # ... (rest of token debug prints: Input IDs shape, Generated token IDs, Decoded with special) ...
             print(f"    Input IDs shape: {inputs['input_ids'].shape}")
             print(f"    Generated token IDs (raw slice): {generated_ids_for_decode.tolist()}")
-            decoded_with_special = tokenizer.decode(generated_ids_for_decode, skip_special_tokens=False)
+            decoded_with_special = tokenizer.decode(
+                generated_ids_for_decode,
+                skip_special_tokens=False
+            )
             print(f"    Decoded (with special tokens): \"{decoded_with_special}\"")
-
 
         generated_text = tokenizer.decode(
             generated_ids_for_decode,
             skip_special_tokens=True
         )
-            
-        # ... (rest of prediction and reference processing, and debug_samples_output append) ...
+
         predicted_label_str = get_predicted_choice_label(
             generated_text,
             current_prompt_labels
@@ -260,27 +254,22 @@ def evaluate_single_dataset(
             invalid_predictions_count += 1
         predictions_indices.append(predicted_idx)
 
-        reference_idx = -2 # Default for error in reference processing
+        # Reference processing with Winogrande debug
+        reference_idx = -2
         correct_answer_text_for_debug = "N/A (error)"
         try:
-            # <<< ADD DEBUG PRINT FOR WINOGRANDE HERE >>>
-            if "winogrande" in config.hf_id.lower(): # Check if it's a Winogrande dataset
-                if i < N_DEBUG_SAMPLES: # Only print for the first few samples
-                    print(f"    DEBUG Winogrande (Sample {i+1}): item['answer'] = '{item.get('answer', 'FIELD_MISSING')}', type: {type(item.get('answer'))}")
-            # <<< END DEBUG PRINT >>>
-
+            if "winogrande" in config.hf_id.lower() and i < N_DEBUG_SAMPLES:
+                print(f"    DEBUG Winogrande (Sample {i+1}): item['answer'] = '{item.get('answer', 'FIELD_MISSING')}', type: {type(item.get('answer'))}")
             reference_idx = config.get_correct_answer_index(item, choice_texts)
             if 0 <= reference_idx < len(choice_texts):
                 correct_answer_text_for_debug = choice_texts[reference_idx]
             else:
-                if i < N_DEBUG_SAMPLES: # Print warning only for debug samples to reduce noise
-                    print(f"  Warning (Sample {i+1}): Reference index {reference_idx} out of bounds "
-                          f"for item with {len(choice_texts)} choices. Item ID: {item.get('id', 'N/A')}")
-                reference_idx = -2 # Mark as problematic reference
+                if i < N_DEBUG_SAMPLES:
+                    print(f"  Warning (Sample {i+1}): Reference index {reference_idx} out of bounds for {len(choice_texts)} choices. ID: {item.get('id', 'N/A')}")
+                reference_idx = -2
         except Exception as e:
-            if i < N_DEBUG_SAMPLES: # Print error only for debug samples
-                print(f"  Error (Sample {i+1}) getting reference index for item "
-                      f"{item.get('id', 'N/A')}: {e}")
+            if i < N_DEBUG_SAMPLES:
+                print(f"  Error (Sample {i+1}) getting reference index: {e}")
             reference_idx = -2
         references_indices.append(reference_idx)
 
@@ -292,21 +281,19 @@ def evaluate_single_dataset(
                 "parsed_prediction_str": predicted_label_str,
                 "predicted_idx": predicted_idx,
                 "reference_idx": reference_idx,
-                "correct_answer_label": current_prompt_labels[reference_idx] if 0 <= reference_idx < len(current_prompt_labels) else "N/A",
+                "correct_answer_label": current_prompt_labels[reference_idx]
+                                        if 0 <= reference_idx < len(current_prompt_labels)
+                                        else "N/A",
                 "correct_answer_text": correct_answer_text_for_debug,
             })
-            
-    # ... (rest of the function: warnings, debug summary, accuracy calculation) ...
+
     if invalid_predictions_count > 0:
-        print(f"  Warning: {invalid_predictions_count}/{len(dataset)} samples had "
-              f"unparseable predictions for {config.name}.")
-    # ... (problematic references warning) ...
+        print(f"  Warning: {invalid_predictions_count}/{len(dataset)} samples had unparseable predictions for {config.name}.")
 
     if debug_samples_output:
         print(f"\n  --- Debug Summary for First {len(debug_samples_output)} Samples for {config.name} ---")
         for k, debug_info in enumerate(debug_samples_output):
             print(f"  Sample {k+1} (ID: {debug_info['id']}):")
-            # ... (debug summary prints)
             print(f"    Choices: {debug_info['choices_texts']}")
             print(f"    Correct Answer: [{debug_info['correct_answer_label']}] \"{debug_info['correct_answer_text']}\" (Ref Idx: {debug_info['reference_idx']})")
             print(f"    Model Raw Output (after skip_special): \"{debug_info['raw_model_output_text']}\"")
@@ -314,7 +301,6 @@ def evaluate_single_dataset(
             print("-" * 30)
 
     accuracy_metric = evaluate.load("accuracy")
-    # ... (accuracy calculation) ...
     try:
         results = accuracy_metric.compute(
             predictions=predictions_indices,
@@ -324,10 +310,9 @@ def evaluate_single_dataset(
     except Exception as e:
         print(f"  Error computing accuracy for {config.name}: {e}")
         accuracy = 0.0
-        
+
     print(f"  Accuracy for {config.name}: {accuracy:.4f}")
-    return {"accuracy": accuracy, "name": config.name,
-            "samples": len(references_indices)}
+    return {"accuracy": accuracy, "name": config.name, "samples": len(references_indices)}
 
 dataset_configs = get_dataset_configs()
 
@@ -336,7 +321,8 @@ def evaluate_commonqa(
     model,
     tokenizer,
     dataset_configs: List[DatasetTaskConfig] = dataset_configs,
-    num_samples_per_dataset: Optional[int] = 200
+    num_samples_per_dataset: Optional[int] = 200,
+    disable_think: bool = False
 ):
     # ... (device setup, model.eval(), tokenizer/model config for pad/eos) ...
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -365,14 +351,14 @@ def evaluate_commonqa(
     print(f"Final Model Config after setup: EOS ID: {model.config.eos_token_id}, PAD ID: {model.config.pad_token_id}")
 
     all_results = []
-    print("num_samples_per_dataset:", num_samples_per_dataset)
     for config_obj in dataset_configs:
         result = evaluate_single_dataset(
             model,
             tokenizer,
             config_obj,
             device,
-            num_samples_per_dataset
+            num_samples_per_dataset,
+            disable_think=disable_think
         )
         if "error" not in result:
             all_results.append(result)
@@ -446,8 +432,6 @@ if __name__ == "__main__":
                 item['choices']['label'].index(str(item['answerKey']))
         )
     ]
-
-    print("num_samples_per_dataset:", NUM_SAMPLES_PER_DATASET)
     evaluate_commonqa(
         model=loaded_model,
         tokenizer=loaded_tokenizer,

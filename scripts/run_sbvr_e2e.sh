@@ -12,14 +12,17 @@
 ##### sbvrizer_paths #####
 # /home/nxclab/wonjun/sbvr/input_profile/meta-llama_Llama-3.2-1B_4_16_16/per_state_encoding
 
+export PATH="$CONDA_PREFIX/bin:$PATH"
+
 python -m sbvr_e2e \
-    --root_sbvr_path "/home/nxclab/hongseung/sbvr/quantized_model/Qwen_Qwen3-8B_4_16_16_w_rotate" \
-    --input_model "Qwen/Qwen3-8B" \
+    --root_sbvr_path "/home/nxclab/hongseung/sbvr/quantized_model/Qwen_Qwen3-0.6B_4_16_16_w_rotate" \
+    --input_model "Qwen/Qwen3-0.6B" \
     --weight_bvr_len 128 \
     --weight_num_sums 4 \
     --rtn_group_size 128 \
     --rtn_bits 7 \
-    --measure_commonqa \
+    --measure_lm_eval \
+    # --measure_commonqa \
     # --measure_ppl \
 
     # --measure_latency \

@@ -1,7 +1,7 @@
 import torch
 import argparse
-from eval_utils.modeling_llama_sbvr import LlamaForSbvrLM
-from eval_utils.modeling_qwen3_sbvr import Qwen3ForSbvrLM
+from eval_utils.modeling_llama_sbvr_4_51_3 import LlamaForSbvrLM
+from eval_utils.modeling_qwen3_sbvr_4_51_3 import Qwen3ForSbvrLM
 from transformers import AutoTokenizer, AutoConfig, LlamaTokenizerFast
 from sbvr_e2e_utils.eval_ppl import r_str, g_str, y_str, b_str
 from paper_eval_package.ppl_benchmark import evaluate_ppl
@@ -80,26 +80,28 @@ def main():
     
     # prepare the model
     if args.load_qmodel_path is not None:
-        if "Llama" in args.input_model:
+        if "llama" in args.load_qmodel_path.lower():
+            print(r_str("Loading Llama model..."))
             model = LlamaForSbvrLM.from_pretrained(
                 args.load_qmodel_path,
-                torch_dtype="auto",
+                torch_dtype=torch.float16,
                 low_cpu_mem_usage=False
             )
-        elif "Qwen3" in args.input_model:
+        elif "qwen3" in args.load_qmodel_path.lower():
+            print(r_str("Loading Qwen3 model..."))
             model = Qwen3ForSbvrLM.from_pretrained(
                 args.load_qmodel_path,
-                torch_dtype="auto",
+                torch_dtype=torch.float16,
                 low_cpu_mem_usage=False
             )
+
     else:
-        if "Llama" in args.input_model:
+        if "llama" in args.input_model.lower():
+            print(r_str("Creating Llama model..."))
             model = LlamaForSbvrLM(config=config, sbvr_state_dict=sbvr_state_dict)
-        elif "Qwen3" in args.input_model:
+        elif "qwen3" in args.input_model.lower():
+            print(r_str("Creating Qwen3 model..."))
             model = Qwen3ForSbvrLM(config=config, sbvr_state_dict=sbvr_state_dict)
-        else:
-            print(args.input_model)
-            raise ValueError(f"Unsupported model type: {args.input_model}")
         
         # fill partial state
         missing, unexpected = model.load_state_dict(
@@ -116,20 +118,11 @@ def main():
         # convert the model to float16
         model.convert_model_dtype(dtype=torch.float16)
         model.preprocess_model()
-        model = model.to("cuda:0")
+        model = model.cuda()
         model.eval()
     print(b_str("Model loaded"))
     print(b_str(f"attn_implementation: {model.config._attn_implementation}"))
-    # sys.exit(0)
-        
-    # tokenizer = AutoTokenizer.from_pretrained(
-    #     pretrained_model_name_or_path=args.input_model,
-    #     cache_dir=None,
-    #     padding_side="right",
-    #     use_fast=True,
-    #     add_eos_token=False,
-    #     add_bos_token=False,
-    # )
+
     tokenizer = AutoTokenizer.from_pretrained(
         pretrained_model_name_or_path=args.input_model,
         padding_side="right",

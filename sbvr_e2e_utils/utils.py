@@ -50,39 +50,42 @@ def print_errors(tensor1, tensor2):
 @torch.inference_mode()
 def get_partial_state(args):
     model_name = args.input_model
-    # ref = LlamaForCausalLM.from_pretrained(
-    #     model_name,
-    #     torch_dtype=torch.float16,
-    #     device_map="cpu"
-    # ).eval()
 
-    ref = Qwen3ForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype="auto",
-        device_map="cpu"
-    ).eval()
-    
-    raw_state = ref.state_dict()
-    # filtered_state = {
-    #     k: v for k, v in raw_state.items()
-    #     if "self_attn" not in k and "mlp" not in k and "quantizer" not in k
-    # }
+    if "llama" in model_name.lower():
+        print("Getting Partial State for Llama Model...")
+        ref = LlamaForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.float16,
+            device_map="cpu"
+        ).eval()
+        raw_state = ref.state_dict()
+        filtered_state = {
+            k: v for k, v in raw_state.items()
+            if "self_attn" not in k and "mlp" not in k and "quantizer" not in k
+        }
+    elif "qwen3" in model_name.lower():
+        print("Getting Partial State for Qwen3 Model...")
+        ref = Qwen3ForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.float16,
+            device_map="cpu"
+        ).eval()
+        
+        raw_state = ref.state_dict()
 
-    filtered_state = {
-        k: v for k, v in raw_state.items()
-        if (
-            # mlp·quantizer 는 전부 제외
-            "mlp" not in k
-            and "quantizer" not in k
-            and (
-                # self_attn 은 기본적으로 제외하지만
-                "self_attn" not in k           # self_attn 이 아닌 나머지
-                or "q_norm" in k               # q_norm 은 예외적으로 포함
-                or "k_norm" in k               # k_norm 도 예외적으로 포함
-                or k.endswith("bias")  # bias 는 예외적으로 포함
+        filtered_state = {
+            k: v for k, v in raw_state.items()
+            if (
+                "mlp" not in k
+                and "quantizer" not in k
+                and (
+                    "self_attn" not in k
+                    or "q_norm" in k
+                    or "k_norm" in k
+                    or k.endswith("bias")
+                )
             )
-        )
-    }
+        }
     
     del ref, raw_state
     cleanup_memory()

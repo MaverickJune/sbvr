@@ -3,17 +3,17 @@
 # set variables
 export PATH="$CONDA_PREFIX/bin:$PATH"
 name=$(echo $1 | sed 's|/|_|g')
-path="quantized_model/${name}_$2_$3_$4"
+path="quantized_model/${name}_4_16_16_w_rotate"
 mkdir -p $path
 
 # meta-llama/Llama-3.2-1B
 # meta-llama/Llama-3.2-3B
 # meta-llama/Llama-3.1-8B
 # meta-llama/Llama-3.1-70B
-# Qwen/Qwen3-0.6B-Base
+# Qwen/Qwen3-0.6B
 
 # launch the python script
-python -m ptq_eff_multi_gpu \
+python -m sbvr_quantize \
 --input_model $1 \
 --do_train False \
 --do_eval True \
@@ -22,10 +22,10 @@ python -m ptq_eff_multi_gpu \
 --fp16 False \
 --bf16 True \
 --save_safetensors False \
---w_bits $2 \
---a_bits $3 \
---k_bits $4 \
---v_bits $4 \
+--w_bits 4 \
+--a_bits 16 \
+--k_bits 16 \
+--v_bits 16 \
 --w_clip \
 --a_asym \
 --k_asym \
