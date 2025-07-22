@@ -4,6 +4,9 @@
 #include <iostream>
 #include <cstdint>
 #include <assert.h>
+#include <tuple>
+
+// #include "rtn_constants.cuh"
 
 // Declare the kernel launcher (templated in the actual .cu file)
 void launch_cuda_sbvr_mm_T(
@@ -27,6 +30,46 @@ void launch_cuda_sbvr_row_deq_mm_T(
     int r_cache_size,
     int use_shfl = 0,
     int device_id = 0);
+
+// Declare the kernel launcher for fused Rtn7 LUT BVR (templated in the actual .cu file)
+void launch_fused_rtn_lut_bvr(
+    const __half* x,
+    uint32_t* out_bvr,
+    float* scales,
+    int num_groups = 128,
+    int nRTN = 6);
+
+// Declare the kernel launcher for RTN-SBVR 1xN mm_T (templated in the actual .cu file)
+void launch_rtn_sbvr_1xtN_mm_T(
+    uint32_t* l_bvr, float* l_scales,
+    uint32_t* r_bvr, void* r_coeff_idx, __half* r_coeff_cache,
+    int r_num_sums,
+    int r_cache_size,
+    int nRTN,
+    __half* bias, __half* out,
+    int N, int K,
+    int device_id = 0);
+
+// Declare the kernel launcher for fused RTN-SBVR 1xN mm_T (templated in the actual .cu file)
+void launch_fused_rtn_sbvr_1xtN_mm_T(
+    __half* x,
+    uint32_t* r_bvr, void* r_coeff_idx, __half* r_coeff_cache,
+    int r_num_sums,
+    int r_cache_size,
+    int nRTN,
+    __half* bias, __half* out,
+    int N, int K,
+    int device_id = 0);
+void launch_cudaGetSymbolAddress_wrapper();
+
+// Declare the kernel launcher for prefill SBVR (templated in the actual .cu file)
+void launch_prefill_sbvr_kernel(
+    __half* x,
+    uint32_t* r_bvr, void* r_coeff_idx, __half* r_coeff_cache,
+    int r_num_sums,
+    int r_cache_size,
+    __half* bias, __half* out,
+    int M, int N, int K);
 
 int device_count;
 cudaDeviceProp cuda_prop_list[16];
@@ -119,6 +162,147 @@ torch::Tensor sbvr_row_deq_mm_T(
     return out;
 }
 
+// PyTorch wrapper for sbvr input transform
+std::tuple<torch::Tensor, torch::Tensor> sbvr_input_transfrom(
+    torch::Tensor x,
+    int nRTN = 7,
+    int group_size = 128)
+{
+    const int M = x.size(0);
+    const int K = x.size(1);
+    const int _nRTN = nRTN + 1;
+    const int c_ratio = 32 / _nRTN;
+    const int num_groups = K / group_size;
+
+    auto out_bvr = torch::empty({K / 32, _nRTN}, torch::dtype(torch::kUInt32).device(x.device()));
+    auto scales = torch::empty({K / group_size}, torch::dtype(torch::kFloat32).device(x.device()));
+
+    launch_fused_rtn_lut_bvr(
+        reinterpret_cast<__half*>(x.data_ptr<at::Half>()),
+        out_bvr.data_ptr<uint32_t>(),
+        scales.data_ptr<float>(),
+        num_groups,
+        nRTN
+    );
+
+    return std::make_tuple(out_bvr, scales);
+}
+
+// PyTorch wrapper for RTN-SBVR 1xN mm_T
+torch::Tensor rtn_sbvr_1xtN_mm_T(
+    torch::Tensor l_bvr,
+    torch::Tensor l_scales,
+    torch::Tensor r_bvr,
+    torch::Tensor r_coeff_idx,
+    torch::Tensor r_coeff_cache,
+    torch::Tensor bias,
+    int nRTN = 7)
+{
+    const int N = r_bvr.size(1);
+    const int K = l_bvr.size(0);
+    const int r_num_sums = r_bvr.size(2);
+    const int r_cache_size = r_coeff_cache.size(0);
+    const int _nRTN = nRTN + 1;
+
+    //printf("l_bvr.size(0): %d, r_bvr.size(0): %d\n", l_bvr.size(0), r_bvr.size(0));
+    // halt the program
+    // assert(false);
+
+    // assert (l_bvr.size(0) == r_bvr.size(0));
+    if (l_bvr.size(0) != r_bvr.size(0))
+        throw std::runtime_error("l_bvr.size(0) != r_bvr.size(0)");
+
+    if (l_bvr.size(1) != _nRTN)
+        throw std::runtime_error("l_bvr.size(1) != _nRTN");
+
+    // Recommendation: do not use bias for RTN-SBVR
+    __half* bias_ptr = nullptr;
+    if (bias.size(0) == N)
+        bias_ptr = reinterpret_cast<__half*>(bias.data_ptr<at::Half>());
+    
+    auto out = torch::empty({1, N}, torch::dtype(torch::kFloat16).device(l_bvr.device()));
+
+    launch_rtn_sbvr_1xtN_mm_T(
+        l_bvr.data_ptr<uint32_t>(), l_scales.data_ptr<float>(),
+        r_bvr.data_ptr<uint32_t>(), r_coeff_idx.data_ptr(), 
+        reinterpret_cast<__half*>(r_coeff_cache.data_ptr<at::Half>()),
+        r_num_sums, r_cache_size, nRTN,
+        bias_ptr,
+        reinterpret_cast<__half*>(out.data_ptr<at::Half>()),
+        N, K);
+
+    return out;
+}
+
+torch::Tensor fused_rtn_sbvr_1xtN_mm_T(
+    torch::Tensor x,
+    torch::Tensor r_bvr,
+    torch::Tensor r_coeff_idx,
+    torch::Tensor r_coeff_cache,
+    torch::Tensor bias,
+    int nRTN = 7)
+{
+    const int N = r_bvr.size(1);
+    const int K = x.size(1);
+    const int r_num_sums = r_bvr.size(2);
+    const int r_cache_size = r_coeff_cache.size(0);
+    const int _nRTN = nRTN + 1;
+
+    //printf("l_bvr.size(0): %d, r_bvr.size(0): %d\n", l_bvr.size(0), r_bvr.size(0));
+    // halt the program
+    // assert(false);
+
+    // Recommendation: do not use bias for RTN-SBVR
+    __half* bias_ptr = nullptr;
+    if (bias.size(0) == N)
+        bias_ptr = reinterpret_cast<__half*>(bias.data_ptr<at::Half>());
+    
+    auto out = torch::empty({1, N}, torch::dtype(torch::kFloat16).device(x.device()));
+
+
+    launch_fused_rtn_sbvr_1xtN_mm_T(
+        reinterpret_cast<__half*>(x.data_ptr<at::Half>()),
+        r_bvr.data_ptr<uint32_t>(), r_coeff_idx.data_ptr(), 
+        reinterpret_cast<__half*>(r_coeff_cache.data_ptr<at::Half>()),
+        r_num_sums, r_cache_size, nRTN,
+        bias_ptr,
+        reinterpret_cast<__half*>(out.data_ptr<at::Half>()),
+        N, K);
+
+    return out;
+}
+
+torch::Tensor sbvr_prefill(
+    torch::Tensor x,
+    torch::Tensor r_bvr,
+    torch::Tensor r_coeff_idx,
+    torch::Tensor r_coeff_cache,
+    torch::Tensor bias)
+{
+    const int M = x.size(0);
+    const int N = r_bvr.size(1);
+    const int K = x.size(1);
+    const int r_num_sums = r_bvr.size(2);
+    const int r_cache_size = r_coeff_cache.size(0);
+
+    auto out = torch::empty({M, N}, torch::dtype(torch::kFloat16).device(x.device()));
+    
+    __half* bias_ptr = nullptr;
+    if (bias.size(0) == N)
+        bias_ptr = reinterpret_cast<__half*>(bias.data_ptr<at::Half>());
+
+    launch_prefill_sbvr_kernel(
+        reinterpret_cast<__half*>(x.data_ptr<at::Half>()),
+        r_bvr.data_ptr<uint32_t>(), r_coeff_idx.data_ptr(), 
+        reinterpret_cast<__half*>(r_coeff_cache.data_ptr<at::Half>()),
+        r_num_sums, r_cache_size,
+        bias_ptr,
+        reinterpret_cast<__half*>(out.data_ptr<at::Half>()),
+        M, N, K);
+
+    return out;
+}
+
 void sbvr_cuda_init() 
 {
     cudaError_t err = cudaGetDeviceCount(&device_count);
@@ -147,7 +331,18 @@ void sbvr_cuda_init()
     }
     std::cout << "\033[92mSBVR Init:\033[0m" 
               << " CUDA Initialization complete." << std::endl;
+
+    launch_cudaGetSymbolAddress_wrapper();
 }
+
+// void load_constants()
+// {
+//     std::cout << "Loaded constants for the SBVR CUDA kernels" << std::endl;
+//     cudaMemcpyToSymbol(RTN_7_PIVOT,
+//                        h_RTN_7_PIVOT,
+//                        sizeof(h_RTN_7_PIVOT),
+//                        0, cudaMemcpyHostToDevice);
+// }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("_sbvr_cuda_init", &sbvr_cuda_init,
@@ -169,4 +364,34 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("bias"),
           py::arg("use_shfl") = 0,
           "SBVR Row-wise, pre-dequantized Matrix-Matrix_Transposed Multiplication kernel");
+    m.def("_sbvr_input_transfrom", &sbvr_input_transfrom,
+          py::arg("x"),
+          py::arg("nRTN") = 6,
+          py::arg("group_size") = 128,
+          "SBVR Input Transform kernel");
+    m.def("_rtn_sbvr_1xtN_mm_T", &rtn_sbvr_1xtN_mm_T,
+          py::arg("l_bvr"),
+          py::arg("l_scales"),
+          py::arg("r_bvr"),
+          py::arg("r_coeff_idx"),
+          py::arg("r_coeff_cache"),
+          py::arg("bias"),
+          py::arg("nRTN") = 7,
+          "RTN-SBVR 1xN Matrix-Matrix_Transposed Multiplication kernel");
+    m.def("_fused_rtn_sbvr_1xtN_mm_T", &fused_rtn_sbvr_1xtN_mm_T,
+          py::arg("x"),
+          py::arg("r_bvr"),
+          py::arg("r_coeff_idx"),
+          py::arg("r_coeff_cache"),
+          py::arg("bias"),
+          py::arg("nRTN") = 7,
+          "Fused RTN-SBVR 1xN Matrix-Matrix_Transposed Multiplication kernel");
+    m.def("_sbvr_prefill", &sbvr_prefill,
+          py::arg("x"),
+          py::arg("r_bvr"),
+          py::arg("r_coeff_idx"),
+          py::arg("r_coeff_cache"),
+          py::arg("bias"),
+          "SBVR Prefill kernel"
+        );
 }

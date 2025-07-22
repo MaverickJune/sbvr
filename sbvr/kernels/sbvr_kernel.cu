@@ -4,7 +4,7 @@
 #include <cstdint>
 
 #define BLOCK_PER_SM 16
-#define K_PER_BVR 8 // BVR size 256
+#define K_PER_BVR 4 // BVR size 128, BVR size = K_PER_BVR * 32 
 #define _1xtN_tN 4
 #define THREAD_PER_WARP 32
 #define WARP_PER_BLOCK 4

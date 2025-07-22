@@ -17,11 +17,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Callable, List, Optional, Tuple, Union
+from functools import partial
+from typing import Callable, Optional, Tuple, Union
 
 import torch
 import torch.utils.checkpoint
-import itertools
 from torch import nn
 
 from transformers.activations import ACT2FN
@@ -36,7 +36,7 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutputWithPast,
     TokenClassifierOutput,
 )
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
@@ -45,6 +45,8 @@ from transformers.utils import (
     add_code_sample_docstrings,
     add_start_docstrings,
     add_start_docstrings_to_model_forward,
+    can_return_tuple,
+    is_torch_flex_attn_available,
     logging,
     replace_return_docstrings,
 )
@@ -52,58 +54,31 @@ from transformers.utils.deprecation import deprecate_kwarg
 from transformers.models.llama.configuration_llama import LlamaConfig
 
 
+if is_torch_flex_attn_available():
+    from torch.nn.attention.flex_attention import BlockMask
+
+    from transformers.integrations.flex_attention import make_flex_block_causal_mask
+
+
+# import sbvr related stuffs
+import sbvr
+from sbvr.core import sbvrizer
+from sbvr import mm_T
+from sbvr.core import input_sbvr_mm_T
+from sbvr import _rtn_sbvr_1xtN_mm_T, _fused_rtn_sbvr_1xtN_mm_T, _sbvr_prefill, _sbvr_input_transfrom
+
+# import additional utils
+import transformers
+from utils import hadamard_utils, fuse_norm_utils
+from eval_utils.rotation_utils import get_orthogonal_matrix, rotate_embeddings, rotate_head
+from utils.utils import cleanup_memory
+import os
+import sys
+
 logger = logging.get_logger(__name__)
 
 _CHECKPOINT_FOR_DOC = "meta-llama/Llama-2-7b-hf"
 _CONFIG_FOR_DOC = "LlamaConfig"
-
-###############################################################################
-# Custom forward pass for SBVRLlama
-
-# Since decode kernel is not supported yet, 
-# we just use the restored weight for gemm
-###############################################################################
-class SBVRLinear(nn.Module):
-    def __init__(self, in_features, out_features, bias=False, coeff_group_size:int=512, num_sums:int=4):
-        super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.bias = bias
-        
-        self.num_sums = num_sums
-        self.coeff = None
-        self.coeff_bias = None
-        self.coeff_idx = None
-        self.coeff_group_size = coeff_group_size
-        self.bin_combs = torch.tensor(
-            list(itertools.product([0, 1], repeat=num_sums)),
-            dtype=self.coeff_dtype, device=self.coeff.device
-        )
-        self.restored_weight = None
-        self.restore_weight()
-        
-              
-    def foward(self, x):
-        return x @ self.restored_weight.T
-    
-    
-    def restore_weight(self):
-        decoded_tensor = torch.empty((self.out_features, self.in_features),
-                                      dtype=self.coeff.dtype,
-                                      device=self.coeff.device)
-        num_coeff_groups = self.coeff_bias.shape[0]
-        for i in range(num_coeff_groups):
-            group_start = i * self.coeff_group_size
-            group_end = \
-                min(group_start + self.coeff_group_size, decoded_tensor.numel())
-            group_coeff_bias = self.coeff_bias[i]
-            group_coeff = self.coeff[i]
-            group_coeff_idx = self.coeff_idx[group_start:group_end]
-            group_all_points = self.bin_combs @ group_coeff + group_coeff_bias
-            group_data = group_all_points[group_coeff_idx]
-            decoded_tensor.flatten()[group_start:group_end] = group_data
-        
-        self.restored_weight = decoded_tensor
 
 
 class LlamaRMSNorm(nn.Module):
@@ -147,45 +122,18 @@ class LlamaRotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
 
-    def _dynamic_frequency_update(self, position_ids, device):
-        """
-        dynamic RoPE layers should recompute `inv_freq` in the following situations:
-        1 - growing beyond the cached sequence length (allow scaling)
-        2 - the current sequence length is in the original scale (avoid losing precision with small sequences)
-        """
-        seq_len = torch.max(position_ids) + 1
-        if seq_len > self.max_seq_len_cached:  # growth
-            inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device, seq_len=seq_len)
-            self.register_buffer("inv_freq", inv_freq, persistent=False)  # TODO joao: may break with compilation
-            self.max_seq_len_cached = seq_len
-
-        if seq_len < self.original_max_seq_len and self.max_seq_len_cached > self.original_max_seq_len:  # reset
-            # This .to() is needed if the model has been moved to a device after being initialized (because
-            # the buffer is automatically moved, but not the original copy)
-            self.original_inv_freq = self.original_inv_freq.to(device)
-            self.register_buffer("inv_freq", self.original_inv_freq, persistent=False)
-            self.max_seq_len_cached = self.original_max_seq_len
-
     @torch.no_grad()
+    @dynamic_rope_update  # power user: used with advanced RoPE types (e.g. dynamic rope)
     def forward(self, x, position_ids):
-        if "dynamic" in self.rope_type:
-            self._dynamic_frequency_update(position_ids, device=x.device)
-
-        # Core RoPE block
-        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
         position_ids_expanded = position_ids[:, None, :].float()
-        # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
-        device_type = x.device.type
-        device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
-        with torch.autocast(device_type=device_type, enabled=False):
+
+        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
+        with torch.autocast(device_type=device_type, enabled=False):  # Force float32
             freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
             emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos()
-            sin = emb.sin()
-
-        # Advanced RoPE types (e.g. yarn) apply a post-processing scaling factor, equivalent to scaling attention
-        cos = cos * self.attention_scaling
-        sin = sin * self.attention_scaling
+            cos = emb.cos() * self.attention_scaling
+            sin = emb.sin() * self.attention_scaling
 
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
@@ -225,19 +173,74 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
 
 
 class LlamaMLP(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_idx=None):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
-        self.act_fn = ACT2FN[config.hidden_act]
 
-    def forward(self, x):
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        return down_proj
+        ### sbvr
+        self.rtn_bits = config.rtn_bits
+        self.rtn_group_size = config.rtn_group_size
+        self.layer_idx = layer_idx
+        
+        self.gate_proj = sbvr.sbvr(
+            encoder_config={
+                "num_sums": config.weight_num_sums,
+                "bvr_len": config.weight_bvr_len,
+                "rtn_bits": config.rtn_bits,
+                "rtn_group_size": config.rtn_group_size
+            },
+            verbose_level=1
+        )
+        self.up_proj = sbvr.sbvr(
+            encoder_config={
+                "num_sums": config.weight_num_sums,
+                "bvr_len": config.weight_bvr_len,
+                "rtn_bits": config.rtn_bits,
+                "rtn_group_size": config.rtn_group_size
+            },
+            verbose_level=1
+        )
+        self.down_proj = sbvr.sbvr(
+            encoder_config={
+                "num_sums": config.weight_num_sums,
+                "bvr_len": config.weight_bvr_len,
+                "rtn_bits": config.rtn_bits,
+                "rtn_group_size": config.rtn_group_size
+            },
+            verbose_level=1
+        )
+
+        self.act_fn = ACT2FN[config.hidden_act]
+        self.had_K, self.K = hadamard_utils.get_hadK(self.intermediate_size)
+
+    def forward(self, x, debug_mode=False):
+        if debug_mode:
+            x = self.act_fn(self.gate_proj.debug_forward(x)) * self.up_proj.debug_forward(x)
+            x = hadamard_utils.matmul_hadU_cuda(x, self.had_K, self.K)
+            x = self.down_proj.debug_forward(x)
+            return x
+    
+
+        bsz, seq_len = x.shape[0], x.shape[1]
+        if x.shape[1] != 1:
+            # prefill stage or multiple tokens, GEMM
+            x = x.view(seq_len, -1)
+            x = self.act_fn(self.gate_proj.p_forward(x)) * self.up_proj.p_forward(x)
+            x = hadamard_utils.matmul_hadU_cuda(x, self.had_K, self.K)
+            x = self.down_proj.p_forward(x)   
+        else:
+            # decode stage or single token, GEMV
+            x = x.view(-1, x.shape[-1])
+            out_bvr, scales = _sbvr_input_transfrom(x, nRTN=self.rtn_bits, group_size=self.rtn_group_size)
+            x = self.act_fn(self.gate_proj.d_forward(out_bvr=out_bvr, scales=scales)) * self.up_proj.d_forward(out_bvr=out_bvr, scales=scales)
+            x = hadamard_utils.matmul_hadU_cuda(x, self.had_K, self.K)
+            x = self.down_proj.d_forward(x)
+        # reshape the output
+        x = x.view(bsz, seq_len, -1)
+
+        return x
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -291,17 +294,44 @@ class LlamaAttention(nn.Module):
         self.attention_dropout = config.attention_dropout
         self.is_causal = True
 
-        self.q_proj = nn.Linear(
-            config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
+        self.rtn_bits = config.rtn_bits
+        self.rtn_group_size = config.rtn_group_size
+
+        self.q_proj = sbvr.sbvr(
+            encoder_config={
+                "num_sums": config.weight_num_sums,
+                "bvr_len": config.weight_bvr_len,
+                "rtn_bits": config.rtn_bits,
+                "rtn_group_size": config.rtn_group_size
+            },
+            verbose_level=1
         )
-        self.k_proj = nn.Linear(
-            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
+        self.k_proj = sbvr.sbvr(
+            encoder_config={
+                "num_sums": config.weight_num_sums,
+                "bvr_len": config.weight_bvr_len,
+                "rtn_bits": config.rtn_bits,
+                "rtn_group_size": config.rtn_group_size
+            },
+            verbose_level=1
         )
-        self.v_proj = nn.Linear(
-            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
+        self.v_proj = sbvr.sbvr(
+            encoder_config={
+                "num_sums": config.weight_num_sums,
+                "bvr_len": config.weight_bvr_len,
+                "rtn_bits": config.rtn_bits,
+                "rtn_group_size": config.rtn_group_size
+            },
+            verbose_level=1
         )
-        self.o_proj = nn.Linear(
-            config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
+        self.o_proj = sbvr.sbvr(
+            encoder_config={
+                "num_sums": config.weight_num_sums,
+                "bvr_len": config.weight_bvr_len,
+                "rtn_bits": config.rtn_bits,
+                "rtn_group_size": config.rtn_group_size
+            },
+            verbose_level=1
         )
 
     def forward(
@@ -311,14 +341,43 @@ class LlamaAttention(nn.Module):
         attention_mask: Optional[torch.Tensor],
         past_key_value: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        debug_mode: bool = False,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         input_shape = hidden_states.shape[:-1]
-        hidden_shape = (*input_shape, -1, self.head_dim)
 
-        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        #### sbvr
+        bsz, q_len, _ = hidden_states.size()
+
+        if debug_mode:
+            query_states = self.q_proj.debug_forward(hidden_states)
+            key_states = self.k_proj.debug_forward(hidden_states)
+            value_states = self.v_proj.debug_forward(hidden_states)
+        else:
+            if q_len != 1:
+                # prefill stage or multiple tokens, GEMM
+                hidden_states = hidden_states.view(q_len, -1)
+                query_states = self.q_proj.p_forward(hidden_states)
+                key_states = self.k_proj.p_forward(hidden_states)
+                value_states = self.v_proj.p_forward(hidden_states)
+            else:
+                # decode stage or single token, GEMV
+                hidden_states = hidden_states.view(q_len, -1)
+                out_bvr, scales = _sbvr_input_transfrom(hidden_states, nRTN=self.rtn_bits, group_size=self.rtn_group_size)
+                query_states = self.q_proj.d_forward(out_bvr=out_bvr, scales=scales)
+                key_states = self.k_proj.d_forward(out_bvr=out_bvr, scales=scales)
+                value_states = self.v_proj.d_forward(out_bvr=out_bvr, scales=scales)
+                
+        query_states = query_states.view(
+            bsz, q_len, -1, self.head_dim
+        ).transpose(1, 2)
+        key_states = key_states.view(
+            bsz, q_len, -1, self.head_dim
+        ).transpose(1, 2)
+        value_states = value_states.view(
+            bsz, q_len, -1, self.head_dim
+        ).transpose(1, 2)
+        ####
 
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
@@ -350,7 +409,20 @@ class LlamaAttention(nn.Module):
         )
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-        attn_output = self.o_proj(attn_output)
+        
+        ### sbvr
+        if debug_mode:
+            attn_output = self.o_proj.debug_forward(attn_output)
+        else:
+            if q_len != 1:
+                attn_output = attn_output.view(q_len, -1)
+                attn_output = self.o_proj.p_forward(attn_output)
+            else:
+                attn_output = attn_output.view(q_len, -1)
+                attn_output = self.o_proj.d_forward(attn_output)
+
+        attn_output = attn_output.view(bsz, q_len, -1)
+
         return attn_output, attn_weights
 
 
@@ -490,20 +562,12 @@ LLAMA_INPUTS_DOCSTRING = r"""
             config.n_positions - 1]`.
 
             [What are position IDs?](../glossary#position-ids)
-        past_key_values (`Cache` or `tuple(tuple(torch.FloatTensor))`, *optional*):
+        past_key_values (`Cache`, *optional*):
             Pre-computed hidden-states (key and values in the self-attention blocks and in the cross-attention
             blocks) that can be used to speed up sequential decoding. This typically consists in the `past_key_values`
             returned by the model at a previous stage of decoding, when `use_cache=True` or `config.use_cache=True`.
 
-            Two formats are allowed:
-            - a [`~cache_utils.Cache`] instance, see our
-            [kv cache guide](https://huggingface.co/docs/transformers/en/kv_cache);
-            - Tuple of `tuple(torch.FloatTensor)` of length `config.n_layers`, with each tuple having 2 tensors of
-            shape `(batch_size, num_heads, sequence_length, embed_size_per_head)`). This is also known as the legacy
-            cache format.
-
-            The model will output the same cache format that is fed as input. If no `past_key_values` are passed, the
-            legacy cache format will be returned.
+            It is a [`~cache_utils.Cache`] instance. For more details, see our [kv cache guide](https://huggingface.co/docs/transformers/en/kv_cache).
 
             If `past_key_values` are used, the user can optionally input only the last `input_ids` (those that don't
             have their past key value states given to this model) of shape `(batch_size, 1)` instead of all `input_ids`
@@ -564,10 +628,11 @@ class LlamaModel(LlamaPreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
+    @can_return_tuple
     @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
     def forward(
         self,
-        input_ids: torch.LongTensor = None,
+        input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Cache] = None,
@@ -575,16 +640,14 @@ class LlamaModel(LlamaPreTrainedModel):
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
-    ) -> Union[Tuple, BaseModelOutputWithPast]:
+    ) -> BaseModelOutputWithPast:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
@@ -594,6 +657,10 @@ class LlamaModel(LlamaPreTrainedModel):
                 "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`."
             )
             use_cache = False
+
+        # TODO (joao): remove this exception in v4.56 -- it exists for users that try to pass a legacy cache
+        if not isinstance(past_key_values, (type(None), Cache)):
+            raise ValueError("The `past_key_values` should be either a `Cache` object or `None`.")
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
@@ -629,7 +696,7 @@ class LlamaModel(LlamaPreTrainedModel):
 
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
-                    decoder_layer.__call__,
+                    partial(decoder_layer.__call__, **flash_attn_kwargs),
                     hidden_states,
                     causal_mask,
                     position_ids,
@@ -663,13 +730,12 @@ class LlamaModel(LlamaPreTrainedModel):
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
-        output = BaseModelOutputWithPast(
+        return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values if use_cache else None,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
         )
-        return output if return_dict else output.to_tuple()
 
     def _update_causal_mask(
         self,
@@ -677,12 +743,17 @@ class LlamaModel(LlamaPreTrainedModel):
         input_tensor: torch.Tensor,
         cache_position: torch.Tensor,
         past_key_values: Cache,
-        output_attentions: bool,
+        output_attentions: bool = False,
     ):
         if self.config._attn_implementation == "flash_attention_2":
             if attention_mask is not None and (attention_mask == 0.0).any():
                 return attention_mask
             return None
+        if self.config._attn_implementation == "flex_attention":
+            if isinstance(attention_mask, torch.Tensor):
+                attention_mask = make_flex_block_causal_mask(attention_mask)
+            if isinstance(attention_mask, BlockMask):
+                return attention_mask
 
         # For SDPA, when possible, we will rely on its `is_causal` argument instead of its `attn_mask` argument, in
         # order to dispatch on Flash Attention 2. This feature is not compatible with static cache, as SDPA will fail
@@ -763,7 +834,7 @@ class LlamaModel(LlamaPreTrainedModel):
             dtype (`torch.dtype`):
                 The dtype to use for the 4D attention mask.
             device (`torch.device`):
-                The device to plcae the 4D attention mask on.
+                The device to place the 4D attention mask on.
             cache_position (`torch.Tensor`):
                 Indices depicting the position of the input sequence tokens in the sequence.
             batch_size (`torch.Tensor`):
@@ -798,19 +869,82 @@ class LlamaModel(LlamaPreTrainedModel):
 class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
 
 
-class SBVRLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
+class LlamaForSbvrLM(LlamaPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
     _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
 
-    def __init__(self, config):
+    def __init__(self, config, sbvr_state_dict=None):
         super().__init__(config)
+
+        #### sbvr
+        if sbvr_state_dict is not None:
+            # raise ValueError("sbvr_state_dict must be provided")
+            weight_bvr_len = sbvr_state_dict["weight_bvr_len"]
+            weight_num_sums = sbvr_state_dict["weight_num_sums"]
+            rtn_group_size = sbvr_state_dict["rtn_group_size"]
+            rtn_bits = sbvr_state_dict["rtn_bits"]
+            root_sbvr_path = sbvr_state_dict.get("root_sbvr_path", None)
+            
+            # write them down to the config
+            config.weight_bvr_len = weight_bvr_len
+            config.weight_num_sums = weight_num_sums
+            config.rtn_group_size = rtn_group_size
+            config.rtn_bits = rtn_bits
+            config.root_sbvr_path = root_sbvr_path # can be None if not provided
+            
+            self.weight_bvr_len = weight_bvr_len
+            self.weight_num_sums = weight_num_sums
+            self.rtn_group_size = rtn_group_size
+            self.rtn_bits = rtn_bits
+        else:
+            print(f"loading model from pretrained")
+
+
         self.model = LlamaModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         # Initialize weights and apply final processing
         self.post_init()
+
+    def load_sbvr_weights(self, root_sbvr_path: str = None, device: str = "cuda:0"):
+        if root_sbvr_path is None:
+            raise ValueError("root_sbvr_path must be provided")
+        
+        for layer_idx, layer in enumerate(self.model.layers):
+            sbvr_q_proj_path = os.path.join(root_sbvr_path, f"sbvr_layer_{layer_idx}_self_attn.q_proj.module.pt")
+            sbvr_k_proj_path = os.path.join(root_sbvr_path, f"sbvr_layer_{layer_idx}_self_attn.k_proj.module.pt")
+            sbvr_v_proj_path = os.path.join(root_sbvr_path, f"sbvr_layer_{layer_idx}_self_attn.v_proj.module.pt")
+            sbvr_o_proj_path = os.path.join(root_sbvr_path, f"sbvr_layer_{layer_idx}_self_attn.o_proj.module.pt")
+            
+            sbvr_up_proj_path = os.path.join(root_sbvr_path, f"sbvr_layer_{layer_idx}_mlp.up_proj.module.pt")
+            sbvr_gate_proj_path = os.path.join(root_sbvr_path, f"sbvr_layer_{layer_idx}_mlp.gate_proj.module.pt")
+            sbvr_down_proj_path = os.path.join(root_sbvr_path, f"sbvr_layer_{layer_idx}_mlp.down_proj.module.pt")
+            
+            layer.self_attn.q_proj = sbvr.load(sbvr_q_proj_path)
+            layer.self_attn.q_proj._set_rtn_bits(self.rtn_bits)
+            
+            layer.self_attn.k_proj = sbvr.load(sbvr_k_proj_path)
+            layer.self_attn.k_proj._set_rtn_bits(self.rtn_bits)
+            
+            layer.self_attn.v_proj = sbvr.load(sbvr_v_proj_path)
+            layer.self_attn.v_proj._set_rtn_bits(self.rtn_bits)
+            
+            layer.self_attn.o_proj = sbvr.load(sbvr_o_proj_path)
+            layer.self_attn.o_proj._set_rtn_bits(self.rtn_bits)
+            
+            layer.mlp.up_proj = sbvr.load(sbvr_up_proj_path)
+            layer.mlp.up_proj._set_rtn_bits(self.rtn_bits)
+            
+            layer.mlp.gate_proj = sbvr.load(sbvr_gate_proj_path)
+            layer.mlp.gate_proj._set_rtn_bits(self.rtn_bits)
+
+            layer.mlp.down_proj = sbvr.load(sbvr_down_proj_path)
+            layer.mlp.down_proj._set_rtn_bits(self.rtn_bits)
+
+        print(f"Loaded SBVR weights from {root_sbvr_path}")
+
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
@@ -830,27 +964,92 @@ class SBVRLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
     def get_decoder(self):
         return self.model
 
+    #### sbvr
+    def pseudo_fuse_layer_norms(self):
+        '''
+        In SpinQuant, it fuses the layer norms into the linear layers
+        Since this effect is already applied in the stored SBVR weights,
+        the only thing we need to do is to set the layer norms to ones, just like the original SpinQuant
+        '''
+        for W in [self.model.embed_tokens]:
+            W_ = W.weight.data.double()
+            W.weight.data = (W_ - W_.mean(dim=-1, keepdim=True)).to(W.weight.data.dtype)
+            
+        fuse_norm_utils.fuse_ln_linear(
+            self.model.norm,
+            [self.lm_head]
+        )
+        
+        for layer in self.model.layers:
+            W_norm = layer.post_attention_layernorm.weight.data
+            layer.post_attention_layernorm.weight.data = torch.ones_like(W_norm)
+            W_norm = layer.input_layernorm.weight.data
+            layer.input_layernorm.weight.data = torch.ones_like(W_norm)
+            
+        W_norm = self.model.norm.weight.data
+        self.model.norm.weight.data = torch.ones_like(W_norm)
+        
+    def rotate_model(self):
+        print("Rotating the model...")
+        transformers.set_seed(0)
+        rotate_mode = "hadamard"
+        R1 = get_orthogonal_matrix(self.config.hidden_size, rotate_mode)
+        
+        rotate_embeddings(self, R1)
+        rotate_head(self, R1)
+        cleanup_memory()
+        print("Model rotated")
+        
+    def preprocess_model(self):
+        self.pseudo_fuse_layer_norms()
+        self.rotate_model()
+        
+    def convert_model_dtype(self, dtype: torch.dtype = torch.float16):
+        self.to(dtype)
+        for layer in self.model.layers:
+            # self_attn
+            layer.self_attn.q_proj = layer.self_attn.q_proj.to(dtype)
+            layer.self_attn.q_proj.original_dtype = dtype
+            
+            layer.self_attn.k_proj = layer.self_attn.k_proj.to(dtype)
+            layer.self_attn.k_proj.original_dtype = dtype
+            
+            layer.self_attn.v_proj = layer.self_attn.v_proj.to(dtype)
+            layer.self_attn.v_proj.original_dtype = dtype
+            
+            layer.self_attn.o_proj = layer.self_attn.o_proj.to(dtype)
+            layer.self_attn.o_proj.original_dtype = dtype
+            
+            # mlp
+            layer.mlp.up_proj = layer.mlp.up_proj.to(dtype)
+            layer.mlp.up_proj.original_dtype = dtype
+            
+            layer.mlp.gate_proj = layer.mlp.gate_proj.to(dtype)
+            layer.mlp.gate_proj.original_dtype = dtype
+            
+            layer.mlp.down_proj = layer.mlp.down_proj.to(dtype)
+            layer.mlp.down_proj.original_dtype = dtype
+
+    @can_return_tuple
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
     def forward(
         self,
-        input_ids: torch.LongTensor = None,
+        input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+        past_key_values: Optional[Cache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
         **kwargs: Unpack[KwargsForCausalLM],
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
+    ) -> CausalLMOutputWithPast:
         r"""
-        Args:
             labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
                 Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
                 config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
@@ -885,10 +1084,9 @@ class SBVRLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        outputs = self.model(
+        outputs: BaseModelOutputWithPast = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -897,12 +1095,11 @@ class SBVRLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
             cache_position=cache_position,
             **kwargs,
         )
 
-        hidden_states = outputs[0]
+        hidden_states = outputs.last_hidden_state
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.lm_head(hidden_states[:, slice_indices, :])
@@ -910,10 +1107,6 @@ class SBVRLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         loss = None
         if labels is not None:
             loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
-
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
 
         return CausalLMOutputWithPast(
             loss=loss,
@@ -955,29 +1148,28 @@ class LlamaForSequenceClassification(LlamaPreTrainedModel):
     def set_input_embeddings(self, value):
         self.model.embed_tokens = value
 
+    @can_return_tuple
     @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+        past_key_values: Optional[Cache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, SequenceClassifierOutputWithPast]:
+    ) -> SequenceClassifierOutputWithPast:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
             Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
             config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
             `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
         """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        transformer_outputs = self.model(
+        transformer_outputs: BaseModelOutputWithPast = self.model(
             input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -986,9 +1178,8 @@ class LlamaForSequenceClassification(LlamaPreTrainedModel):
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
         )
-        hidden_states = transformer_outputs[0]
+        hidden_states = transformer_outputs.last_hidden_state
         logits = self.score(hidden_states)
 
         if input_ids is not None:
@@ -1003,7 +1194,7 @@ class LlamaForSequenceClassification(LlamaPreTrainedModel):
         elif input_ids is not None:
             # To handle both left- and right- padding, we take the rightmost token that is not equal to pad_token_id
             non_pad_mask = (input_ids != self.config.pad_token_id).to(logits.device, torch.int32)
-            token_indices = torch.arange(input_ids.shape[-1], device=logits.device)
+            token_indices = torch.arange(input_ids.shape[-1], device=logits.device, dtype=torch.int32)
             last_non_pad_token = (token_indices * non_pad_mask).argmax(-1)
         else:
             last_non_pad_token = -1
@@ -1017,10 +1208,6 @@ class LlamaForSequenceClassification(LlamaPreTrainedModel):
         loss = None
         if labels is not None:
             loss = self.loss_function(logits=logits, labels=labels, pooled_logits=pooled_logits, config=self.config)
-
-        if not return_dict:
-            output = (pooled_logits,) + transformer_outputs[1:]
-            return ((loss,) + output) if loss is not None else output
 
         return SequenceClassifierOutputWithPast(
             loss=loss,
@@ -1056,21 +1243,21 @@ class LlamaForQuestionAnswering(LlamaPreTrainedModel):
     def set_input_embeddings(self, value):
         self.transformer.embed_tokens = value
 
+    @can_return_tuple
     @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+        past_key_values: Optional[Cache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         start_positions: Optional[torch.LongTensor] = None,
         end_positions: Optional[torch.LongTensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
         **kwargs,
-    ) -> Union[Tuple, QuestionAnsweringModelOutput]:
+    ) -> QuestionAnsweringModelOutput:
         r"""
         start_positions (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
             Labels for position (index) of the start of the labelled span for computing the token classification loss.
@@ -1081,9 +1268,8 @@ class LlamaForQuestionAnswering(LlamaPreTrainedModel):
             Positions are clamped to the length of the sequence (`sequence_length`). Position outside of the sequence
             are not taken into account for computing the loss.
         """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        outputs = self.transformer(
+        outputs: BaseModelOutputWithPast = self.transformer(
             input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -1091,10 +1277,9 @@ class LlamaForQuestionAnswering(LlamaPreTrainedModel):
             inputs_embeds=inputs_embeds,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
         )
 
-        sequence_output = outputs[0]
+        sequence_output = outputs.last_hidden_state
 
         logits = self.qa_outputs(sequence_output)
         start_logits, end_logits = logits.split(1, dim=-1)
@@ -1104,10 +1289,6 @@ class LlamaForQuestionAnswering(LlamaPreTrainedModel):
         loss = None
         if start_positions is not None and end_positions is not None:
             loss = self.loss_function(start_logits, end_logits, start_positions, end_positions, **kwargs)
-
-        if not return_dict:
-            output = (start_logits, end_logits) + outputs[2:]
-            return ((loss,) + output) if loss is not None else output
 
         return QuestionAnsweringModelOutput(
             loss=loss,
@@ -1148,6 +1329,7 @@ class LlamaForTokenClassification(LlamaPreTrainedModel):
     def set_input_embeddings(self, value):
         self.model.embed_tokens = value
 
+    @can_return_tuple
     @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -1159,23 +1341,21 @@ class LlamaForTokenClassification(LlamaPreTrainedModel):
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        past_key_values: Optional[Cache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, TokenClassifierOutput]:
+    ) -> TokenClassifierOutput:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
             Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
             config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
             `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
         """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        outputs = self.model(
+        outputs: BaseModelOutputWithPast = self.model(
             input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -1184,19 +1364,14 @@ class LlamaForTokenClassification(LlamaPreTrainedModel):
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
         )
-        sequence_output = outputs[0]
+        sequence_output = outputs.last_hidden_state
         sequence_output = self.dropout(sequence_output)
         logits = self.score(sequence_output)
 
         loss = None
         if labels is not None:
             loss = self.loss_function(logits, labels, self.config)
-
-        if not return_dict:
-            output = (logits,) + outputs[2:]
-            return ((loss,) + output) if loss is not None else output
 
         return TokenClassifierOutput(
             loss=loss,

@@ -340,7 +340,7 @@ def sbvr_mat_mat_mult_test(mat_len=512, num_sums=6,
     print_errors(mat_mat_ab, sbvr_cuda_mat_mat_ab)
     
 def sbvr_matmul_time_test(mat_len=512, sbvr_max_sums=6, 
-                          device=torch.device("cpu"), num_runs=10000):
+                          device=torch.device("cpu"), num_runs=1000, with_bias=True):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     mat_a_size = (1, mat_len)
     mat_b_size = (mat_len, mat_len)
@@ -348,17 +348,34 @@ def sbvr_matmul_time_test(mat_len=512, sbvr_max_sums=6,
     mat_b = load_or_create_tensor("matrix_b", mat_b_size, device)
     bias = torch.randn((mat_b.size(0),), dtype=torch.float16, device=device)*0.3
     
-    for i in range(10):
-        f16_matmul = mat_a @ mat_b.T + bias
-    torch.cuda.synchronize()
-    time_start = time.perf_counter()
-    for i in range(num_runs):
-        f16_matmul = mat_a @ mat_b.T + bias
-    torch.cuda.synchronize()
-    f16_time = (time.perf_counter() - time_start) / num_runs
+    # torch.cuda.synchronize()
+    
+    if with_bias:
+        for i in range(50):
+            f16_matmul = mat_a @ mat_b.T + bias
+        torch.cuda.synchronize()
+        time_start = time.perf_counter()
+        for i in range(num_runs):
+            f16_matmul = mat_a @ mat_b.T + bias
+        torch.cuda.synchronize()
+        f16_time = (time.perf_counter() - time_start) / num_runs
+    else:
+        # start_evt = torch.cuda.Event(enable_timing=True)
+        # end_evt   = torch.cuda.Event(enable_timing=True)
+        for i in range(50):
+            f16_matmul = mat_a @ mat_b.T
+        torch.cuda.synchronize()
+        time_start = time.perf_counter()
+        # start_evt.record()
+        for i in range(num_runs):
+            f16_matmul = mat_a @ mat_b.T
+        # end_evt.record()
+        torch.cuda.synchronize()
+        f16_time = (time.perf_counter() - time_start) / num_runs
 
     sbvr_time = {}
     sbvr_dict = {}
+    
     for i in range (sbvr_max_sums, 1, -2):
         mat_a_sbvr = load_or_create_sbvr("matrix_a", mat_a.shape, device, i,
                                         verbose_level=1)
@@ -371,7 +388,10 @@ def sbvr_matmul_time_test(mat_len=512, sbvr_max_sums=6,
         rhs_coeff_idx = mat_b_sbvr.coeff_idx
         rhs_coeff_cache = mat_b_sbvr.coeff_cache
         
-        for _ in range(10):
+        if not with_bias:
+            bias = mat_a_sbvr._get_dummy_bias()
+        
+        for _ in range(50):
             sbvr_matmul = sbvr._sbvr_mm_T(
                                     lhs_bvr, lhs_coeff_idx, lhs_coeff_cache,
                                     rhs_bvr, rhs_coeff_idx, rhs_coeff_cache,
@@ -394,8 +414,8 @@ def sbvr_matmul_time_test(mat_len=512, sbvr_max_sums=6,
         if value is not None:
             print_errors(f16_matmul, value)
         print(y_str("\tMatmul time taken: ") 
-              + f"{sbvr_time[key]*10e6:.4f} usecs"
-              + y_str(" vs ") + f"{f16_time*10e6:.4f} usecs")
+              + f"{sbvr_time[key]*1e6:.4f} usecs"
+              + y_str(" vs ") + f"{f16_time*1e6:.4f} usecs")
         print(y_str("\tSpeedup: ") + f"{f16_time/sbvr_time[key]:.4f}x")
         
 def sbvr_rd_matmul_time_test(mat_len=512, sbvr_max_sums=6,
@@ -489,15 +509,15 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(0)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
         
     mat_len = sys.argv[1]
     sbvr_max_sums = sys.argv[2]
     
     # sbvr_randn_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_randn_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
-    sbvr_rd_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device, no_numsums_iter=True)
     # sbvr_store_and_load_test(int(mat_len), int(sbvr_max_sums), device=device)
     # sbvr_mat_mat_mult_test(int(mat_len), int(sbvr_max_sums), device=device)
-    # sbvr_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device)
+    sbvr_matmul_time_test(int(mat_len), int(sbvr_max_sums), device=device, with_bias=False)
     # sbvr_online_test(int(mat_len), int(sbvr_max_sums), device=device)
     # os.system(f"rm -rf {out_dir}")
