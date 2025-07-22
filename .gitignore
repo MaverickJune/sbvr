@@ -24,3 +24,4 @@ experiment_figures/
 *AWQ-gemv/
 
 baseline/
+quantized_*/
