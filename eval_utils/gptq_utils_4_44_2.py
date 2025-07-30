@@ -257,7 +257,6 @@ def gptq_fwrd(model, dataloader, dev, args):
         def __init__(self, module):
             super().__init__()
             self.module = module
-            # self.attention_type = module.attention_type # for transformers 4.53.2
 
         def forward(self, inp, **kwargs):
             inps[cache["i"]] = inp
@@ -502,12 +501,6 @@ def _per_gpu_sbvr_fwrd(model, curr_device, args, n_gpus,
                         gptq[name].add_batch(inp[0].data, out.data)  # noqa: F821
 
                     return tmp
-                
-                if hasattr(model.model, "rotary_emb"):
-                    sample_embeds = inps[0].unsqueeze(0).to(curr_device)
-                    position_embeddings = model.model.rotary_emb(sample_embeds, position_ids)
-                else:
-                    position_embeddings = None
 
                 handles = []
                 for name in subset:
@@ -517,7 +510,6 @@ def _per_gpu_sbvr_fwrd(model, curr_device, args, n_gpus,
                         inps[j].unsqueeze(0),
                         attention_mask=attention_mask,
                         position_ids=position_ids,
-                        position_embeddings=position_embeddings
                     )[0]
                 for h in handles:
                     h.remove()
@@ -565,19 +557,12 @@ def _per_gpu_sbvr_fwrd(model, curr_device, args, n_gpus,
                         )
                     gptq[name].free()
                 del gptq
-        
-        if hasattr(model.model, "rotary_emb"):
-            sample_embeds = inps[0].unsqueeze(0).to(curr_device)
-            position_embeddings = model.model.rotary_emb(sample_embeds, position_ids)
-        else:
-            position_embeddings = None
 
         for j in range(args.nsamples):
             outs[j] = layer(
                 inps[j].unsqueeze(0),
                 attention_mask=attention_mask,
                 position_ids=position_ids,
-                position_embeddings=position_embeddings
             )[0]
 
         layers[i] = layer.cpu()
@@ -613,7 +598,6 @@ def sbvrize_fwrd(model, dataloader, args):
         def __init__(self, module):
             super().__init__()
             self.module = module
-            # self.attention_type = module.attention_type # for transformers 4.53.2
 
         def forward(self, inp, **kwargs):
             inps[cache["i"]] = inp

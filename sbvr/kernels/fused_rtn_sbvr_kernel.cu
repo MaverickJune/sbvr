@@ -156,7 +156,7 @@ float encode_rtn7_group_warp(const __half* __restrict x,   // 128 vals
                           __shfl_down_sync(FULL_MASK, local_max, ofs));
 
     const float grp_max   = __shfl_sync(FULL_MASK, local_max, 0);
-    const float grp_scale = fmaxf(grp_max / 63.f, 1e-30f);    // ±63 범위
+    const float grp_scale = fmaxf(grp_max / 63.f, 1e-30f);
 
     /* 3) 4-chunk 양자화 & ballot */
     #pragma unroll
@@ -168,11 +168,11 @@ float encode_rtn7_group_warp(const __half* __restrict x,   // 128 vals
         #pragma unroll
         for (int bit = 0; bit < 8; ++bit) {
             uint32_t mask = __ballot_sync(FULL_MASK, (val >> bit) & 1);
-            if (lane == 0) bvr[chunk * 8 + bit] = mask;       // warp 대표가 기록
+            if (lane == 0) bvr[chunk * 8 + bit] = mask; 
         }
     }
 
-    return grp_scale;    // 호출자에게 스케일 반환
+    return grp_scale;  
 }
 
 
@@ -197,8 +197,6 @@ __global__ void fused_rtn_7_sbvr_1xtN_mm_T(
     extern __shared__ uint32_t smem[];
     uint32_t* l_bvr = smem;
     float* l_scales = (float*)(l_bvr + num_groups * 4 * (_nRTN + 1));
-
-    /* ── 인코딩 루프 ──────────────────────────────────────────────── */
 
 
     for (int gb = 0; gb < num_groups; gb += GROUPS_PER_BLOCK) {

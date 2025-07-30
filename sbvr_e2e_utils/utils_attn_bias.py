@@ -71,14 +71,12 @@ def get_partial_state(args):
     filtered_state = {
         k: v for k, v in raw_state.items()
         if (
-            # mlp·quantizer 는 전부 제외
             "mlp" not in k
             and "quantizer" not in k
             and (
-                # self_attn 은 기본적으로 제외하지만
-                "self_attn" not in k           # self_attn 이 아닌 나머지
-                or "q_norm" in k               # q_norm 은 예외적으로 포함
-                or "k_norm" in k               # k_norm 도 예외적으로 포함
+                "self_attn" not in k        
+                or "q_norm" in k         
+                or "k_norm" in k            
             )
         )
     }

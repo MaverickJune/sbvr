@@ -257,13 +257,13 @@ def gptq_fwrd(model, dataloader, dev, args):
         def __init__(self, module):
             super().__init__()
             self.module = module
-            # self.attention_type = module.attention_type # for transformers 4.53.2
+            self.attention_type = module.attention_type
 
         def forward(self, inp, **kwargs):
             inps[cache["i"]] = inp
             cache["i"] += 1
             cache["attention_mask"] = kwargs["attention_mask"]
-            cache["position_ids"] = kwargs["position_ids"]
+            cache["position_embeddings"] = kwargs["position_embeddings"]
             raise ValueError
 
     layers[0] = Catcher(layers[0])
@@ -281,7 +281,7 @@ def gptq_fwrd(model, dataloader, dev, args):
 
     outs = torch.zeros_like(inps)
     attention_mask = cache["attention_mask"]
-    position_ids = cache["position_ids"]
+    position_embeddings = (cache["position_embeddings"][0].cuda(), cache["position_embeddings"][1].cuda())
 
     quantizers = {}
     weights = {}
@@ -344,7 +344,7 @@ def gptq_fwrd(model, dataloader, dev, args):
                     outs[j] = layer(
                         inps[j].unsqueeze(0),
                         attention_mask=attention_mask,
-                        position_ids=position_ids,
+                        position_embeddings=position_embeddings,
                     )[0]
                 for h in handles:
                     h.remove()
@@ -399,7 +399,7 @@ def gptq_fwrd(model, dataloader, dev, args):
             outs[j] = layer(
                 inps[j].unsqueeze(0),
                 attention_mask=attention_mask,
-                position_ids=position_ids,
+                position_embeddings=position_embeddings,
             )[0]
 
         layers[i] = layer.cpu()
@@ -437,7 +437,7 @@ def gptq_fwrd(model, dataloader, dev, args):
 
 @torch.inference_mode()
 def _per_gpu_sbvr_fwrd(model, curr_device, args, n_gpus,
-                       attention_mask, position_ids,
+                       attention_mask, position_embeddings,
                        inps):
     # setup basic things
     sequential = [
@@ -454,8 +454,8 @@ def _per_gpu_sbvr_fwrd(model, curr_device, args, n_gpus,
     layers = model.model.layers
     
     attention_mask = attention_mask.to(curr_device) if attention_mask is not None else None
-    position_ids = position_ids.to(curr_device)
-
+    position_embeddings = (position_embeddings[0].to(curr_device), position_embeddings[1].to(curr_device))
+    
     inps = inps.clone().to(curr_device)
     outs = torch.zeros_like(inps)
     
@@ -502,12 +502,6 @@ def _per_gpu_sbvr_fwrd(model, curr_device, args, n_gpus,
                         gptq[name].add_batch(inp[0].data, out.data)  # noqa: F821
 
                     return tmp
-                
-                if hasattr(model.model, "rotary_emb"):
-                    sample_embeds = inps[0].unsqueeze(0).to(curr_device)
-                    position_embeddings = model.model.rotary_emb(sample_embeds, position_ids)
-                else:
-                    position_embeddings = None
 
                 handles = []
                 for name in subset:
@@ -516,8 +510,7 @@ def _per_gpu_sbvr_fwrd(model, curr_device, args, n_gpus,
                     outs[j] = layer(
                         inps[j].unsqueeze(0),
                         attention_mask=attention_mask,
-                        position_ids=position_ids,
-                        position_embeddings=position_embeddings
+                        position_embeddings=position_embeddings,
                     )[0]
                 for h in handles:
                     h.remove()
@@ -565,19 +558,12 @@ def _per_gpu_sbvr_fwrd(model, curr_device, args, n_gpus,
                         )
                     gptq[name].free()
                 del gptq
-        
-        if hasattr(model.model, "rotary_emb"):
-            sample_embeds = inps[0].unsqueeze(0).to(curr_device)
-            position_embeddings = model.model.rotary_emb(sample_embeds, position_ids)
-        else:
-            position_embeddings = None
 
         for j in range(args.nsamples):
             outs[j] = layer(
                 inps[j].unsqueeze(0),
                 attention_mask=attention_mask,
-                position_ids=position_ids,
-                position_embeddings=position_embeddings
+                position_embeddings=position_embeddings,
             )[0]
 
         layers[i] = layer.cpu()
@@ -613,13 +599,13 @@ def sbvrize_fwrd(model, dataloader, args):
         def __init__(self, module):
             super().__init__()
             self.module = module
-            # self.attention_type = module.attention_type # for transformers 4.53.2
+            self.attention_type = module.attention_type
 
         def forward(self, inp, **kwargs):
             inps[cache["i"]] = inp
             cache["i"] += 1
             cache["attention_mask"] = kwargs["attention_mask"]
-            cache["position_ids"] = kwargs["position_ids"]
+            cache["position_embeddings"] = kwargs["position_embeddings"]
             # print(f"kwargs: {kwargs}") # 11
             raise ValueError
 
@@ -649,8 +635,9 @@ def sbvrize_fwrd(model, dataloader, args):
 
     outs = torch.zeros_like(inps)
     attention_mask = cache["attention_mask"].cpu() if cache["attention_mask"] is not None else None # attention mask can be None since it use SDPA
-    position_ids = cache["position_ids"].cpu()
-    
+    # position_ids = cache["position_embeddings"].cpu()
+    position_embeddings = (cache["position_embeddings"][0].cpu(), cache["position_embeddings"][1].cpu())
+
     # initialize multiprocessing for SBVR
     mp.set_start_method('spawn', force=True)
     mp.set_sharing_strategy('file_system')
@@ -664,7 +651,7 @@ def sbvrize_fwrd(model, dataloader, args):
         curr_device = i
         proc_list[i] = mp.Process(
             target=_per_gpu_sbvr_fwrd,
-            args=(model, curr_device, args, n_gpus, attention_mask, position_ids, inps)
+            args=(model, curr_device, args, n_gpus, attention_mask, position_embeddings, inps)
         )
         proc_list[i].start()
     for i in range(n_gpus):

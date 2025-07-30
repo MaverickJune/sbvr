@@ -1,5 +1,10 @@
 #! /bin/bash
 
+##### model names #####
+# meta-llama/Llama-3.2-1B
+# Qwen/Qwen3-0.6B
+
+
 export PATH="$CONDA_PREFIX/bin:$PATH"
 
 python -m sbvr_e2e \
@@ -9,6 +14,4 @@ python -m sbvr_e2e \
     --weight_num_sums 4 \
     --rtn_group_size 128 \
     --rtn_bits 7 \
-    --measure_ppl \
-    --measure_lm_eval \
-    
+    --test_cudagraph

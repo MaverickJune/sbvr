@@ -55,7 +55,7 @@ def get_partial_state(args):
         print("Getting Partial State for Llama Model...")
         ref = LlamaForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.float16,
+            torch_dtype="auto",
             device_map="cpu"
         ).eval()
         raw_state = ref.state_dict()
@@ -67,7 +67,7 @@ def get_partial_state(args):
         print("Getting Partial State for Qwen3 Model...")
         ref = Qwen3ForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.float16,
+            torch_dtype="auto",
             device_map="cpu"
         ).eval()
         

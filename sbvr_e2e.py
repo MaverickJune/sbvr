@@ -1,9 +1,10 @@
 import torch
 import argparse
-from eval_utils.modeling_llama_sbvr import LlamaForSbvrLM
-from eval_utils.modeling_qwen3_sbvr import Qwen3ForSbvrLM
+from eval_utils.modeling_llama_sbvr_4_51_3 import LlamaForSbvrLM
+from eval_utils.modeling_qwen3_sbvr_4_51_3 import Qwen3ForSbvrLM
 from transformers import AutoTokenizer, AutoConfig, LlamaTokenizerFast
 from sbvr_e2e_utils.eval_ppl import r_str, g_str, y_str, b_str
+from paper_eval_package.cudagraph_utils import attach_cudagraph_generate
 from paper_eval_package.ppl_benchmark import evaluate_ppl
 from paper_eval_package.latency_benchmark import evaluate_latency
 from paper_eval_package.commonqa_benchmark import evaluate_commonqa, get_dataset_configs
@@ -40,14 +41,12 @@ def parse_args():
                         help="whether to use flash attention")
     parser.add_argument("--measure_ppl", action="store_true",
                         help="whether to measure the ppl of the model")
-    parser.add_argument("--measure_latency", action="store_true",
-                        help="whether to measure the latency of the model")
     parser.add_argument("--measure_commonqa", action="store_true",
                         help="whether to measure the commonqa of the model")
     parser.add_argument("--measure_lm_eval", action="store_true",
                         help="whether to measure the lm eval of the model")
-    # parser.add_argument("--test_cudagraph", action="store_true",
-    #                     help="whether to test cudagraph")
+    parser.add_argument("--test_cudagraph", action="store_true",
+                        help="whether to test cudagraph")
     args = parser.parse_args()
     
     return args
@@ -119,42 +118,16 @@ def main():
         model = model.to("cuda:0")
         model.eval()
     print(b_str("Model loaded"))
+    model.config._attn_implementation = "flash_attention" if args.flash_attn else "sdpa"
     print(b_str(f"attn_implementation: {model.config._attn_implementation}"))
     # sys.exit(0)
         
-    # tokenizer = AutoTokenizer.from_pretrained(
-    #     pretrained_model_name_or_path=args.input_model,
-    #     cache_dir=None,
-    #     padding_side="right",
-    #     use_fast=True,
-    #     add_eos_token=False,
-    #     add_bos_token=False,
-    # )
     tokenizer = AutoTokenizer.from_pretrained(
         pretrained_model_name_or_path=args.input_model,
         padding_side="right",
         use_fast=True,
     )
 
-    # for layer_idx in range(6, 7):
-    #     target_layer = model.model.layers[layer_idx]
-
-    #     mlp_module = target_layer.mlp
-    #     sbvr_module = target_layer.mlp.down_proj
-    #     hidden_dim = mlp_module.hidden_size * 4
-    #     print(f"hidden_dim: {hidden_dim}")
-
-    #     dummy_x = torch.randn(1, 1, hidden_dim, device="cuda:0", dtype=torch.float16)
-    #     dummy_x_flat = dummy_x.view(1, -1)  # (seq_len, hidden_dim) = (1, hidden_dim)
-
-    #     try:
-    #         with torch.no_grad():
-    #             out = sbvr_module.d_forward(dummy_x_flat)
-    #         print(f"Layer {layer_idx} output shape: {out.shape}")
-    #     except Exception as e:
-    #         print(f"[Layer {layer_idx}] Error: {e}")
-    #         continue
-        
     if args.save_qmodel_path:
         print(b_str("Saving the quantized model..."))
         model.save_pretrained(
@@ -166,12 +139,6 @@ def main():
         
     if args.measure_ppl:
         ppl = evaluate_ppl(
-            model=model,
-            tokenizer=tokenizer
-        )
-
-    if args.measure_latency:
-        latency_result = evaluate_latency(
             model=model,
             tokenizer=tokenizer
         )
@@ -187,20 +154,12 @@ def main():
         )
         print(g_str("CommonQA evaluation completed"))
     
-    if args.measure_lm_eval:
-        evaluate_lm_eval_benchmark(
+    if args.test_cudagraph:
+        attach_cudagraph_generate(model, tokenizer,device="cuda:0", dtype=torch.float16)
+        latency_result = evaluate_latency(
             model=model,
-            tokenizer=tokenizer,
-            model_path=args.root_sbvr_path if args.root_sbvr_path else args.load_qmodel_path
+            tokenizer=tokenizer
         )
-        print(g_str("LM Eval benchmark completed"))
-        
-    # if args.test_cudagraph:
-    #     attach_cudagraph_generate(model, tokenizer,device="cuda", dtype=torch.float16)
-    #     latency_result = evaluate_latency(
-    #         model=model,
-    #         tokenizer=tokenizer
-    #     )
         
 if __name__ == "__main__":
     main()

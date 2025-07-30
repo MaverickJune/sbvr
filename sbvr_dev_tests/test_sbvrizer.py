@@ -9,9 +9,9 @@ import sys
 @torch.inference_mode()
 def test():
     device = "cuda:0"
-    target_weight_sbvr_path = "/home/nxclab/wonjun/sbvr/quantized_model/meta-llama_Llama-3.2-1B_4_16_16/sbvr_layer_0_self_attn.q_proj.module.pt"
-    target_input_sbvrizer_path = "/home/nxclab/wonjun/sbvr/input_profile/meta-llama_Llama-3.2-1B_4_16_16/per_state_encoding/0_k_proj.pt"
-    target_data_path = "/home/nxclab/wonjun/sbvr/input_profile/meta-llama_Llama-3.2-1B_4_16_16/layer_io/000.pt"
+    target_weight_sbvr_path = "./quantized_model/meta-llama_Llama-3.2-1B_4_16_16/sbvr_layer_0_self_attn.q_proj.module.pt"
+    target_input_sbvrizer_path = "./input_profile/meta-llama_Llama-3.2-1B_4_16_16/per_state_encoding/0_k_proj.pt"
+    target_data_path = "./input_profile/meta-llama_Llama-3.2-1B_4_16_16/layer_io/000.pt"
 
     # load the modules and the input data
     w_sbvr = sbvr_load(target_weight_sbvr_path, device=device)
