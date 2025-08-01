@@ -1,5 +1,5 @@
 import torch
-from transformers import LlamaForCausalLM, Qwen3ForCausalLM
+from transformers import LlamaForCausalLM # , Qwen3ForCausalLM
 from utils.utils import cleanup_memory
 
 def r_str(s):

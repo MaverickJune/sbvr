@@ -6,8 +6,6 @@
 #include <assert.h>
 #include <tuple>
 
-#include <sstream>
-
 // #include "rtn_constants.cuh"
 
 // Declare the kernel launcher (templated in the actual .cu file)
@@ -214,12 +212,8 @@ torch::Tensor rtn_sbvr_1xtN_mm_T(
     if (l_bvr.size(0) != r_bvr.size(0))
         throw std::runtime_error("l_bvr.size(0) != r_bvr.size(0)");
 
-    if (l_bvr.size(1) != _nRTN) {
-        std::ostringstream ss;                     // ← declare it inside the braces
-        ss << "Size mismatch: l_bvr.size(1) = "
-        << l_bvr.size(1) << ", _nRTN = " << _nRTN;
-        throw std::runtime_error(ss.str());
-    }
+    if (l_bvr.size(1) != _nRTN)
+        throw std::runtime_error("l_bvr.size(1) != _nRTN");
 
     // Recommendation: do not use bias for RTN-SBVR
     __half* bias_ptr = nullptr;

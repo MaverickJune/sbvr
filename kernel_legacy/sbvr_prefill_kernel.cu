@@ -1,5 +1,6 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #include <mma.h>
 #include <iostream>
 #include <cstdint>
@@ -179,9 +180,9 @@ __device__ void store_frag_as_fp16_guarded(
 
  template <typename RIndexT, int RNumSums>
  __global__ void sbvr_prefill_mm_T(
-    __half* __restrict__ x,
-    uint32_t* r_bvr, RIndexT* r_coeff_idx, __half* __restrict__ r_coeff_cache,
-    __half* __restrict__ bias, __half* __restrict__ out,
+    half* __restrict__ x,
+    uint32_t* r_bvr, RIndexT* r_coeff_idx, half* __restrict__ r_coeff_cache,
+    half* __restrict__ bias, half* __restrict__ out,
     int M, int N, int K)
 {
     // 1. CTA indices and other important indices
@@ -265,11 +266,11 @@ __device__ void store_frag_as_fp16_guarded(
  *  Note that in prefill kernel, K is not divided by 32 originally
  * ========================================================================= */
 void launch_prefill_sbvr_kernel(
-    __half* x,
-    uint32_t* r_bvr, void* r_coeff_idx, __half* r_coeff_cache,
+    half* x,
+    uint32_t* r_bvr, void* r_coeff_idx, half* r_coeff_cache,
     int r_num_sums,
     int r_cache_size,
-    __half* bias, __half* out,
+    half* bias, half* out,
     int M, int N, int K)
 {
     // 1. determine the type of r_coeff_idx

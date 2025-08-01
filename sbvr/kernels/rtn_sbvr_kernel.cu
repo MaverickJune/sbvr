@@ -6,6 +6,8 @@
 #include <cmath>
 
 // #include "rtn_constants.cuh"
+#include <ATen/ATen.h>                 // Tensor, Scalar, etc.  (optional)
+#include <ATen/cuda/CUDAContext.h>     // at::cuda::getCurrentCUDAStream
 
 #define GROUP_SIZE 128
 
@@ -129,6 +131,7 @@ static constexpr __half h(u_int16_t bits) noexcept
     return __half{ __half_raw{ bits } };
 }
 
+/* define tables for RTN encoding */
 __device__ __constant__ __half RTN_7_PIVOT[8] = {
     h(0x3C00),   //  +1.0
     h(0x4000),   //  +2.0
@@ -139,6 +142,22 @@ __device__ __constant__ __half RTN_7_PIVOT[8] = {
     h(0x5400),   // +64.0
     h(0xD800)    // −128.0
     // h(0xD3E0)    // -63.0  h(0xD800)    // −128.0
+};
+
+__device__ __constant__ __half RTN_5_PIVOT[6] = {
+    h(0x3C00),   //  +1.0
+    h(0x4000),   //  +2.0
+    h(0x4400),   //  +4.0
+    h(0x4800),   //  +8.0
+    h(0x4C00),   // +16.0,
+    h(0xD000)   // −32.0
+};
+
+__device__ __constant__ __half RTN_3_PIVOT[4] = {
+    h(0x3C00),   //  +1.0
+    h(0x4000),   //  +2.0
+    h(0x4400),   //  +4.0
+    h(0xC800)   // −8.0
 };
 
 /*****************************************************************************
@@ -263,6 +282,218 @@ __global__ void rtn_7_sbvr_1xtN_mm_T(
     }
 }
 
+template <typename RIndexT, int RNumSums, int TileN>
+__global__ void rtn_5_sbvr_1xtN_mm_T(
+    uint32_t *__restrict__ l_bvr, float *__restrict__ l_scales,
+    uint32_t* r_bvr, RIndexT* r_coeff_idx, __half* __restrict__ r_coeff_cache,
+    __half* __restrict__ bias, __half* __restrict__ out,
+    int N, int K)
+{
+    constexpr int LNumSums = 6;
+
+    const int tblock_per_N = (N + TileN - 1) / TileN;
+    const int bvr_per_K = K / K_PER_BVR;
+
+    for (int tblock_id = blockIdx.x * blockDim.z + threadIdx.z; 
+        tblock_id < tblock_per_N;
+         tblock_id += gridDim.x * blockDim.z)
+    {
+        const int n = tblock_id * TileN + threadIdx.x;
+        float sum = 0.0f;
+        if (n < N)
+        {
+            for (int bvr_idx = threadIdx.y; bvr_idx < bvr_per_K; 
+                    bvr_idx += blockDim.y)
+            {
+                // If all bits of l_bvr and r_bvr are set, this may overflow.
+                uchar4 popc_cache [LNumSums / 2][RNumSums / 2] = {};
+                #pragma unroll
+                for (int k = 0; k < K_PER_BVR; k++)
+                {
+                    const int k_idx = bvr_idx * K_PER_BVR + k;
+                    const bvrs<LNumSums> l_bvrs = 
+                        *(bvrs<LNumSums>*)(&l_bvr[k_idx * LNumSums]);
+                    const bvrs<RNumSums> r_bvrs = 
+                        *(bvrs<RNumSums>*)(&r_bvr[(k_idx * N + n) * RNumSums]);
+                    #pragma unroll
+                    for (int l_idx = 0; l_idx < LNumSums / 2; l_idx++)
+                    {
+                        #pragma unroll
+                        for (int r_idx = 0; r_idx < RNumSums / 2; r_idx++)
+                        {
+                            const uint32_t l_0 = l_bvrs.get(l_idx * 2);
+                            const uint32_t l_1 = l_bvrs.get(l_idx * 2 + 1);
+                            const uint32_t r_0 = r_bvrs.get(r_idx * 2);
+                            const uint32_t r_1 = r_bvrs.get(r_idx * 2 + 1);
+                            popc_cache[l_idx][r_idx].x += __popc(l_0 & r_0);
+                            popc_cache[l_idx][r_idx].y += __popc(l_1 & r_1);
+                            popc_cache[l_idx][r_idx].z += __popc(l_0 & r_1);
+                            popc_cache[l_idx][r_idx].w += __popc(l_1 & r_0);
+                        }
+                    }
+                }
+
+                // get the coeffs and scale
+                const coeffs<LNumSums> l_coeffs = 
+                    *(coeffs<LNumSums>*)(RTN_5_PIVOT);
+                const float l_scale = __ldg(&l_scales[bvr_idx]);
+                const int r_coeff_i = __ldg(&r_coeff_idx[bvr_idx * N + n]);
+                const coeffs<RNumSums> r_coeffs = 
+                    *(coeffs<RNumSums>*)(&r_coeff_cache[r_coeff_i * RNumSums]);
+
+                #pragma unroll
+                for (int l_idx = 0; l_idx < LNumSums / 2; l_idx++)
+                {
+                    #pragma unroll
+                    for (int r_idx = 0; r_idx < RNumSums / 2; r_idx++)
+                    {
+                        const __half2 popc_h_0 = 
+                            __halves2half2(
+                                __ushort2half_rd(
+                                    (ushort)popc_cache[l_idx][r_idx].x),
+                                __ushort2half_rd(
+                                    (ushort)popc_cache[l_idx][r_idx].y));
+                        const __half2 popc_h_1 = 
+                            __halves2half2(
+                                __ushort2half_rd(
+                                    (ushort)popc_cache[l_idx][r_idx].z),
+                                __ushort2half_rd(
+                                    (ushort)popc_cache[l_idx][r_idx].w));
+                        const __half2 l_coeff = __hmul2(l_coeffs.coeff[l_idx],
+                                                        __float2half2_rn(l_scale));
+                        const __half2 r_coeff = r_coeffs.coeff[r_idx];
+                        const __half2 coeff_0 = __hmul2(l_coeff, r_coeff);
+                        const __half2 coeff_1 =
+                            __hmul2(l_coeff, 
+                                        __halves2half2(__high2half(r_coeff), 
+                                                       __low2half(r_coeff)));
+                        const __half2 mult_sum = __hfma2(coeff_0, popc_h_0, 
+                                                    __hmul2(coeff_1, popc_h_1));                               
+                        sum += __half2float(mult_sum.x) + 
+                               __half2float(mult_sum.y);
+                    }
+                }
+            }
+        }
+        #pragma unroll
+        for (int i = (THREAD_PER_WARP / TileN) / 2; i > 0; i /= 2)
+            sum += __shfl_down_sync(0xFFFFFFFF, sum, i * TileN);
+
+        if (threadIdx.y == 0 && n < N)
+        {
+            __half bias_val = (bias != nullptr ? bias[n] : __float2half(0.0f));
+            bias_val = __hadd(__float2half(sum), bias_val);  
+            out[n] = bias_val; 
+        }
+    }
+}
+
+template <typename RIndexT, int RNumSums, int TileN>
+__global__ void rtn_3_sbvr_1xtN_mm_T(
+    uint32_t *__restrict__ l_bvr, float *__restrict__ l_scales,
+    uint32_t* r_bvr, RIndexT* r_coeff_idx, __half* __restrict__ r_coeff_cache,
+    __half* __restrict__ bias, __half* __restrict__ out,
+    int N, int K)
+{
+    constexpr int LNumSums = 4;
+
+    const int tblock_per_N = (N + TileN - 1) / TileN;
+    const int bvr_per_K = K / K_PER_BVR;
+
+    for (int tblock_id = blockIdx.x * blockDim.z + threadIdx.z; 
+        tblock_id < tblock_per_N;
+         tblock_id += gridDim.x * blockDim.z)
+    {
+        const int n = tblock_id * TileN + threadIdx.x;
+        float sum = 0.0f;
+        if (n < N)
+        {
+            for (int bvr_idx = threadIdx.y; bvr_idx < bvr_per_K; 
+                    bvr_idx += blockDim.y)
+            {
+                // If all bits of l_bvr and r_bvr are set, this may overflow.
+                uchar4 popc_cache [LNumSums / 2][RNumSums / 2] = {};
+                #pragma unroll
+                for (int k = 0; k < K_PER_BVR; k++)
+                {
+                    const int k_idx = bvr_idx * K_PER_BVR + k;
+                    const bvrs<LNumSums> l_bvrs = 
+                        *(bvrs<LNumSums>*)(&l_bvr[k_idx * LNumSums]);
+                    const bvrs<RNumSums> r_bvrs = 
+                        *(bvrs<RNumSums>*)(&r_bvr[(k_idx * N + n) * RNumSums]);
+                    #pragma unroll
+                    for (int l_idx = 0; l_idx < LNumSums / 2; l_idx++)
+                    {
+                        #pragma unroll
+                        for (int r_idx = 0; r_idx < RNumSums / 2; r_idx++)
+                        {
+                            const uint32_t l_0 = l_bvrs.get(l_idx * 2);
+                            const uint32_t l_1 = l_bvrs.get(l_idx * 2 + 1);
+                            const uint32_t r_0 = r_bvrs.get(r_idx * 2);
+                            const uint32_t r_1 = r_bvrs.get(r_idx * 2 + 1);
+                            popc_cache[l_idx][r_idx].x += __popc(l_0 & r_0);
+                            popc_cache[l_idx][r_idx].y += __popc(l_1 & r_1);
+                            popc_cache[l_idx][r_idx].z += __popc(l_0 & r_1);
+                            popc_cache[l_idx][r_idx].w += __popc(l_1 & r_0);
+                        }
+                    }
+                }
+
+                // get the coeffs and scale
+                const coeffs<LNumSums> l_coeffs = 
+                    *(coeffs<LNumSums>*)(RTN_3_PIVOT);
+                const float l_scale = __ldg(&l_scales[bvr_idx]);
+                const int r_coeff_i = __ldg(&r_coeff_idx[bvr_idx * N + n]);
+                const coeffs<RNumSums> r_coeffs = 
+                    *(coeffs<RNumSums>*)(&r_coeff_cache[r_coeff_i * RNumSums]);
+
+                #pragma unroll
+                for (int l_idx = 0; l_idx < LNumSums / 2; l_idx++)
+                {
+                    #pragma unroll
+                    for (int r_idx = 0; r_idx < RNumSums / 2; r_idx++)
+                    {
+                        const __half2 popc_h_0 = 
+                            __halves2half2(
+                                __ushort2half_rd(
+                                    (ushort)popc_cache[l_idx][r_idx].x),
+                                __ushort2half_rd(
+                                    (ushort)popc_cache[l_idx][r_idx].y));
+                        const __half2 popc_h_1 = 
+                            __halves2half2(
+                                __ushort2half_rd(
+                                    (ushort)popc_cache[l_idx][r_idx].z),
+                                __ushort2half_rd(
+                                    (ushort)popc_cache[l_idx][r_idx].w));
+                        const __half2 l_coeff = __hmul2(l_coeffs.coeff[l_idx],
+                                                        __float2half2_rn(l_scale));
+                        const __half2 r_coeff = r_coeffs.coeff[r_idx];
+                        const __half2 coeff_0 = __hmul2(l_coeff, r_coeff);
+                        const __half2 coeff_1 =
+                            __hmul2(l_coeff, 
+                                        __halves2half2(__high2half(r_coeff), 
+                                                       __low2half(r_coeff)));
+                        const __half2 mult_sum = __hfma2(coeff_0, popc_h_0, 
+                                                    __hmul2(coeff_1, popc_h_1));                               
+                        sum += __half2float(mult_sum.x) + 
+                               __half2float(mult_sum.y);
+                    }
+                }
+            }
+        }
+        #pragma unroll
+        for (int i = (THREAD_PER_WARP / TileN) / 2; i > 0; i /= 2)
+            sum += __shfl_down_sync(0xFFFFFFFF, sum, i * TileN);
+
+        if (threadIdx.y == 0 && n < N)
+        {
+            __half bias_val = (bias != nullptr ? bias[n] : __float2half(0.0f));
+            bias_val = __hadd(__float2half(sum), bias_val);  
+            out[n] = bias_val; 
+        }
+    }
+}
+
 /*****************************************************************************
  *  Fused kernel: RTN quantise  → LUT remap  → 8×32-bit BVR packing
  *  Each block handles 1×128-elem group   (blockDim = 128 threads = 4 warps)
@@ -315,6 +546,102 @@ __global__ void fused_rtn7_lut_bvr(const __half  *__restrict__ x,
     }
 }
 
+__global__ void fused_rtn5_lut_bvr(const __half  *__restrict__ x,
+                                  uint32_t      *__restrict__ out_bvr,
+                                  float         *__restrict__ scales,
+                                  int            num_groups)
+{
+    if (blockIdx.x >= num_groups) return;
+
+    const int gid  = blockIdx.x;           // group id
+    const int tid  = threadIdx.x;          // 0-127
+    const int lane = tid & 31;             // 0-31
+    const int warp = tid >> 5;             // 0-3
+    const int base = gid * GROUP_SIZE;
+
+    /* ── 1. group max-abs ────────────────────────────────────────────────── */
+    float v    = __half2float(x[base + tid]);
+    float amax = warpMax(fabsf(v));
+
+    __shared__ float warp_max[4];
+    if (lane == 0) warp_max[warp] = amax;
+    __syncthreads();
+
+    if (warp == 0) {
+        // Only lanes 0-3 load valid data; others load a neutral element
+        float gmax = (lane < 4) ? warp_max[lane] : -FLT_MAX;
+        gmax       = warpMax(gmax);      // second-level reduction inside warp 0
+        if (lane == 0) warp_max[0] = gmax;
+    }
+    __syncthreads();
+    const float gmax = warp_max[0];
+    const float s    = gmax / 31.f + 1e-10f;
+    // const float s    = gmax / 63.f + 1e-10f;
+    if (tid == 0) scales[gid] = s;
+
+    /* ── 2. quantise + LUT ───────────────────────────────────────────────── */
+    // uint8_t val = static_cast<uint8_t>(__float2int_rn(v / s) + 191);
+    uint8_t val = static_cast<uint8_t>(__float2int_rn(v / s) + 32);
+
+    /* ── 3. bit-vector pack (8 ballots) ─────────────────────────────────── */
+    #pragma unroll
+    for (int bit = 0; bit < 6; ++bit) {
+        uint32_t bitvec = __ballot_sync(FULL_MASK, (val >> bit) & 1);
+        if (bit == 5)
+            bitvec = ~bitvec;
+        if (lane == 0)
+            out_bvr[gid * 24 + warp * 6 + bit] = bitvec;
+    }
+}
+
+__global__ void fused_rtn3_lut_bvr(const __half  *__restrict__ x,
+                                  uint32_t      *__restrict__ out_bvr,
+                                  float         *__restrict__ scales,
+                                  int            num_groups)
+{
+    if (blockIdx.x >= num_groups) return;
+
+    const int gid  = blockIdx.x;           // group id
+    const int tid  = threadIdx.x;          // 0-127
+    const int lane = tid & 31;             // 0-31
+    const int warp = tid >> 5;             // 0-3
+    const int base = gid * GROUP_SIZE;
+
+    /* ── 1. group max-abs ────────────────────────────────────────────────── */
+    float v    = __half2float(x[base + tid]);
+    float amax = warpMax(fabsf(v));
+
+    __shared__ float warp_max[4];
+    if (lane == 0) warp_max[warp] = amax;
+    __syncthreads();
+
+    if (warp == 0) {
+        // Only lanes 0-3 load valid data; others load a neutral element
+        float gmax = (lane < 4) ? warp_max[lane] : -FLT_MAX;
+        gmax       = warpMax(gmax);      // second-level reduction inside warp 0
+        if (lane == 0) warp_max[0] = gmax;
+    }
+    __syncthreads();
+    const float gmax = warp_max[0];
+    const float s    = gmax / 7.f + 1e-10f;
+    // const float s    = gmax / 63.f + 1e-10f;
+    if (tid == 0) scales[gid] = s;
+
+    /* ── 2. quantise + LUT ───────────────────────────────────────────────── */
+    // uint8_t val = static_cast<uint8_t>(__float2int_rn(v / s) + 191);
+    uint8_t val = static_cast<uint8_t>(__float2int_rn(v / s) + 8);
+
+    /* ── 3. bit-vector pack (8 ballots) ─────────────────────────────────── */
+    #pragma unroll
+    for (int bit = 0; bit < 4; ++bit) {
+        uint32_t bitvec = __ballot_sync(FULL_MASK, (val >> bit) & 1);
+        if (bit == 3)
+            bitvec = ~bitvec;
+        if (lane == 0)
+            out_bvr[gid * 16 + warp * 4 + bit] = bitvec;
+    }
+}
+
 template <typename RIndexT, int RNumSums>
 void launch_rtn_sbvr_1xtN_mm_T_kernel_wrapper(
     uint32_t* l_bvr, float* l_scales,
@@ -326,9 +653,24 @@ void launch_rtn_sbvr_1xtN_mm_T_kernel_wrapper(
 {
     int blocks = cuda_prop_list[device_id].multiProcessorCount * BLOCK_PER_SM;
     dim3 threads = {_1xtN_tN, THREAD_PER_WARP / _1xtN_tN, WARP_PER_BLOCK};
+    auto stream = at::cuda::getCurrentCUDAStream();
 
     if (nRTN == 7) {
-        rtn_7_sbvr_1xtN_mm_T<RIndexT, RNumSums, _1xtN_tN><<<blocks, threads>>>(
+        rtn_7_sbvr_1xtN_mm_T<RIndexT, RNumSums, _1xtN_tN><<<blocks, threads, 0, stream>>>(
+            l_bvr, l_scales,
+            r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
+            bias, out,
+            N, K);
+    }
+    else if (nRTN == 5) {
+        rtn_5_sbvr_1xtN_mm_T<RIndexT, RNumSums, _1xtN_tN><<<blocks, threads, 0, stream>>>(
+            l_bvr, l_scales,
+            r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
+            bias, out,
+            N, K);
+    }
+    else if (nRTN == 3) {
+        rtn_3_sbvr_1xtN_mm_T<RIndexT, RNumSums, _1xtN_tN><<<blocks, threads, 0, stream>>>(
             l_bvr, l_scales,
             r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
             bias, out,
@@ -389,9 +731,16 @@ void launch_fused_rtn_lut_bvr(
     int nRTN = 7)
 {
     dim3 grid(num_groups), block(GROUP_SIZE);
+    auto stream = at::cuda::getCurrentCUDAStream();
 
     if (nRTN == 7){
-        fused_rtn7_lut_bvr<<<grid, block>>>(x, out_bvr, scales, num_groups);
+        fused_rtn7_lut_bvr<<<grid, block, 0, stream>>>(x, out_bvr, scales, num_groups);
+    }
+    else if (nRTN == 5) {
+        fused_rtn5_lut_bvr<<<grid, block, 0, stream>>>(x, out_bvr, scales, num_groups);
+    }
+    else if (nRTN == 3) {
+        fused_rtn3_lut_bvr<<<grid, block, 0, stream>>>(x, out_bvr, scales, num_groups);
     }
     else{
         throw std::runtime_error("launch_fused_rtn_lut_bvr: nRTN value not implemented");
@@ -418,6 +767,7 @@ void launch_fused_rtn_7_sbvr_1xtN_mm_T_kernel_wrapper(
     // grid and threadblock config for mm_T
     int blocks_mm_T = cuda_prop_list[device_id].multiProcessorCount * BLOCK_PER_SM;
     dim3 threads_mm_T = {_1xtN_tN, THREAD_PER_WARP / _1xtN_tN, WARP_PER_BLOCK};
+    auto stream = at::cuda::getCurrentCUDAStream();
 
     // set num_groups
     int num_groups = K / GROUP_SIZE;
@@ -426,8 +776,66 @@ void launch_fused_rtn_7_sbvr_1xtN_mm_T_kernel_wrapper(
     dim3 grid_rtn_input(num_groups), block_rtn_input(GROUP_SIZE);
 
     // launch the kernels in sequential manner
-    fused_rtn7_lut_bvr<<<grid_rtn_input, block_rtn_input>>>(x, d_bvr_ptr, d_scales_ptr, num_groups);
-    rtn_7_sbvr_1xtN_mm_T<RIndexT, RNumSums, _1xtN_tN><<<blocks_mm_T, threads_mm_T>>>(
+    fused_rtn7_lut_bvr<<<grid_rtn_input, block_rtn_input, 0, stream>>>(x, d_bvr_ptr, d_scales_ptr, num_groups);
+    rtn_7_sbvr_1xtN_mm_T<RIndexT, RNumSums, _1xtN_tN><<<blocks_mm_T, threads_mm_T, 0, stream>>>(
+                d_bvr_ptr, d_scales_ptr,
+                r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
+                bias, out,
+                N, K / 32);
+
+}
+
+template <typename RIndexT, int RNumSums>
+void launch_fused_rtn_5_sbvr_1xtN_mm_T_kernel_wrapper(
+    __half* x,
+    uint32_t* r_bvr, void* r_coeff_idx, __half* r_coeff_cache,
+    __half* bias, __half* out,
+    int N, int K,
+    int device_id = 0)
+{
+    // grid and threadblock config for mm_T
+    int blocks_mm_T = cuda_prop_list[device_id].multiProcessorCount * BLOCK_PER_SM;
+    dim3 threads_mm_T = {_1xtN_tN, THREAD_PER_WARP / _1xtN_tN, WARP_PER_BLOCK};
+    auto stream = at::cuda::getCurrentCUDAStream();
+
+    // set num_groups
+    int num_groups = K / GROUP_SIZE;
+
+    // grid and threadblock config for rtn_input
+    dim3 grid_rtn_input(num_groups), block_rtn_input(GROUP_SIZE);
+
+    // launch the kernels in sequential manner
+    fused_rtn5_lut_bvr<<<grid_rtn_input, block_rtn_input, 0, stream>>>(x, d_bvr_ptr, d_scales_ptr, num_groups);
+    rtn_5_sbvr_1xtN_mm_T<RIndexT, RNumSums, _1xtN_tN><<<blocks_mm_T, threads_mm_T, 0, stream>>>(
+                d_bvr_ptr, d_scales_ptr,
+                r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
+                bias, out,
+                N, K / 32);
+
+}
+
+template <typename RIndexT, int RNumSums>
+void launch_fused_rtn_3_sbvr_1xtN_mm_T_kernel_wrapper(
+    __half* x,
+    uint32_t* r_bvr, void* r_coeff_idx, __half* r_coeff_cache,
+    __half* bias, __half* out,
+    int N, int K,
+    int device_id = 0)
+{
+    // grid and threadblock config for mm_T
+    int blocks_mm_T = cuda_prop_list[device_id].multiProcessorCount * BLOCK_PER_SM;
+    dim3 threads_mm_T = {_1xtN_tN, THREAD_PER_WARP / _1xtN_tN, WARP_PER_BLOCK};
+    auto stream = at::cuda::getCurrentCUDAStream();
+
+    // set num_groups
+    int num_groups = K / GROUP_SIZE;
+
+    // grid and threadblock config for rtn_input
+    dim3 grid_rtn_input(num_groups), block_rtn_input(GROUP_SIZE);
+
+    // launch the kernels in sequential manner
+    fused_rtn3_lut_bvr<<<grid_rtn_input, block_rtn_input, 0, stream>>>(x, d_bvr_ptr, d_scales_ptr, num_groups);
+    rtn_3_sbvr_1xtN_mm_T<RIndexT, RNumSums, _1xtN_tN><<<blocks_mm_T, threads_mm_T, 0, stream>>>(
                 d_bvr_ptr, d_scales_ptr,
                 r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
                 bias, out,
@@ -448,21 +856,51 @@ void launch_fused_rtn_sbvr_1xtN_mm_T(
 
     const bool use_r_uint8 = (r_cache_size <= 256);
 
-    if (use_r_uint8 && nRTN == 7) {
+    if (use_r_uint8) {
         if (r_num_sums == 4) {
-            launch_fused_rtn_7_sbvr_1xtN_mm_T_kernel_wrapper<uint8_t, 4>(
-                x, r_bvr, r_coeff_idx, r_coeff_cache,
-                bias, out, N, K, device_id);
+            if (nRTN == 7) {
+                launch_fused_rtn_7_sbvr_1xtN_mm_T_kernel_wrapper<uint8_t, 4>(
+                    x, r_bvr, r_coeff_idx, r_coeff_cache,
+                    bias, out, N, K, device_id);
+            }
+            else if (nRTN == 5) {
+                launch_fused_rtn_5_sbvr_1xtN_mm_T_kernel_wrapper<uint8_t, 4>(
+                    x, r_bvr, r_coeff_idx, r_coeff_cache,
+                    bias, out, N, K, device_id);
+            }
+            else if (nRTN == 3) {
+                launch_fused_rtn_3_sbvr_1xtN_mm_T_kernel_wrapper<uint8_t, 4>(
+                    x, r_bvr, r_coeff_idx, r_coeff_cache,
+                    bias, out, N, K, device_id);
+            }
+            else {
+                throw std::runtime_error("Unsupported r_num_sums value");
+            }
         }
         else {
             throw std::runtime_error("Unsupported r_num_sums value");
         }
     } 
-    else if(use_r_uint8 == false && nRTN == 7) {
+    else if(use_r_uint8 == false) {
         if (r_num_sums == 4) {
-            launch_fused_rtn_7_sbvr_1xtN_mm_T_kernel_wrapper<uint16_t, 4>(
-                x, r_bvr, r_coeff_idx, r_coeff_cache,
-                bias, out, N, K, device_id);
+            if (nRTN == 7) {
+                launch_fused_rtn_7_sbvr_1xtN_mm_T_kernel_wrapper<uint16_t, 4>(
+                    x, r_bvr, r_coeff_idx, r_coeff_cache,
+                    bias, out, N, K, device_id);
+            }
+            else if (nRTN == 5) {
+                launch_fused_rtn_5_sbvr_1xtN_mm_T_kernel_wrapper<uint16_t, 4>(
+                    x, r_bvr, r_coeff_idx, r_coeff_cache,
+                    bias, out, N, K, device_id);
+            }
+            else if (nRTN == 3) {
+                launch_fused_rtn_3_sbvr_1xtN_mm_T_kernel_wrapper<uint16_t, 4>(
+                    x, r_bvr, r_coeff_idx, r_coeff_cache,
+                    bias, out, N, K, device_id);
+            }
+            else {
+                throw std::runtime_error("Unsupported r_num_sums value");
+            }
         }
         else {
             throw std::runtime_error("Unsupported r_num_sums value");

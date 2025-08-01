@@ -3,7 +3,7 @@ import transformers
 import sys
 import os
 
-from eval_utils import gptq_utils, rotation_utils
+from eval_utils import gptq_utils_4_44_2, rotation_utils
 from utils import data_utils, fuse_norm_utils, hadamard_utils, quant_utils, utils, profile_utils
 from utils.convert_to_executorch import (
     sanitize_checkpoint_from_spinquant,
@@ -55,7 +55,7 @@ def sbvrize_model(args, model, model_args=None):
                 raise ValueError("Export to executorch is not supported for SBVR PTQ")
             
             # call the sbvr_ptq function
-            gptq_utils.sbvrize_fwrd(model, dataloader=trainloader, args=args)
+            gptq_utils_4_44_2.sbvrize_fwrd(model, dataloader=trainloader, args=args)
             
     if args.a_bits < 16 or args.v_bits < 16:
         raise ValueError("Activation and Value quantization is not supported for SBVR PTQ")

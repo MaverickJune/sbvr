@@ -1,7 +1,7 @@
 import torch
 import argparse
-from eval_utils.modeling_llama_sbvr_4_51_3 import LlamaForSbvrLM
-from eval_utils.modeling_qwen3_sbvr_4_51_3 import Qwen3ForSbvrLM
+from eval_utils.modeling_llama_sbvr_4_44_2 import LlamaForSbvrLM
+# from eval_utils.modeling_qwen3_sbvr_4_51_3 import Qwen3ForSbvrLM
 from transformers import AutoTokenizer, AutoConfig, LlamaTokenizerFast
 from sbvr_e2e_utils.eval_ppl import r_str, g_str, y_str, b_str
 from paper_eval_package.cudagraph_utils import attach_cudagraph_generate
