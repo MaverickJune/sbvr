@@ -1,7 +1,7 @@
 import torch
 import argparse
 from eval_utils.modeling_llama_sbvr_4_44_2 import LlamaForSbvrLM
-# from eval_utils.modeling_qwen3_sbvr_4_51_3 import Qwen3ForSbvrLM
+# from eval_utils.modeling_qwen3_sbvr_4_53_2 import Qwen3ForSbvrLM
 from transformers import AutoTokenizer, AutoConfig, LlamaTokenizerFast
 from sbvr_e2e_utils.eval_ppl import r_str, g_str, y_str, b_str
 from paper_eval_package.cudagraph_utils import attach_cudagraph_generate
@@ -41,8 +41,6 @@ def parse_args():
                         help="whether to use flash attention")
     parser.add_argument("--measure_ppl", action="store_true",
                         help="whether to measure the ppl of the model")
-    parser.add_argument("--measure_commonqa", action="store_true",
-                        help="whether to measure the commonqa of the model")
     parser.add_argument("--measure_lm_eval", action="store_true",
                         help="whether to measure the lm eval of the model")
     parser.add_argument("--test_cudagraph", action="store_true",
@@ -143,16 +141,13 @@ def main():
             tokenizer=tokenizer
         )
     
-    if args.measure_commonqa:
-        NUM_SAMPLES_PER_DATASET = 200
-        dataset_configs = get_dataset_configs()
-        evaluate_commonqa(
-            model=model,
-            tokenizer=tokenizer,
-            dataset_configs=dataset_configs,
-            num_samples_per_dataset=NUM_SAMPLES_PER_DATASET
-        )
-        print(g_str("CommonQA evaluation completed"))
+    if args.measure_lm_eval:
+            results = evaluate_lm_eval_benchmark(
+                model=model,
+                tokenizer=tokenizer,
+                model_path=args.input_model,
+            )
+            print(g_str("CommonQA evaluation completed"))
     
     if args.test_cudagraph:
         attach_cudagraph_generate(model, tokenizer,device="cuda:0", dtype=torch.float16)
