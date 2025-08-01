@@ -3,6 +3,7 @@
 #include <iostream>
 #include <cstdint>
 #include <cfloat>
+#include <cmath>
 
 // #include "rtn_constants.cuh"
 
@@ -136,7 +137,8 @@ __device__ __constant__ __half RTN_7_PIVOT[8] = {
     h(0x4C00),   // +16.0
     h(0x5000),   // +32.0
     h(0x5400),   // +64.0
-    h(0xD3E0)    // −63.0
+    h(0xD800)    // −128.0
+    // h(0xD3E0)    // -63.0  h(0xD800)    // −128.0
 };
 
 /*****************************************************************************
@@ -213,7 +215,7 @@ __global__ void rtn_7_sbvr_1xtN_mm_T(
                 const int r_coeff_i = __ldg(&r_coeff_idx[bvr_idx * N + n]);
                 const coeffs<RNumSums> r_coeffs = 
                     *(coeffs<RNumSums>*)(&r_coeff_cache[r_coeff_i * RNumSums]);
-                
+
                 #pragma unroll
                 for (int l_idx = 0; l_idx < LNumSums / 2; l_idx++)
                 {
@@ -294,19 +296,20 @@ __global__ void fused_rtn7_lut_bvr(const __half  *__restrict__ x,
     }
     __syncthreads();
     const float gmax = warp_max[0];
-    const float s    = gmax / 63.f + 1e-10f;
+    const float s    = gmax / 127.f + 1e-10f;
+    // const float s    = gmax / 63.f + 1e-10f;
     if (tid == 0) scales[gid] = s;
 
     /* ── 2. quantise + LUT ───────────────────────────────────────────────── */
-     //int idx = __float2int_rn(v / s) + 31;          // 0-62
-    // idx     = max(0, min(63, idx));                // clamp
-    // uint8_t val = IDX_LUT[idx];
-    uint8_t val = static_cast<uint8_t>(__float2int_rn(v / s) + 191); // [-63, 2^6, 2^5, .... 2^1, 2^0]. 191 = 128 + 63
+    // uint8_t val = static_cast<uint8_t>(__float2int_rn(v / s) + 191);
+    uint8_t val = static_cast<uint8_t>(__float2int_rn(v / s) + 128);
 
     /* ── 3. bit-vector pack (8 ballots) ─────────────────────────────────── */
     #pragma unroll
     for (int bit = 0; bit < 8; ++bit) {
         uint32_t bitvec = __ballot_sync(FULL_MASK, (val >> bit) & 1);
+        if (bit == 7)
+            bitvec = ~bitvec;
         if (lane == 0)
             out_bvr[gid * 32 + warp * 8 + bit] = bitvec;
     }
@@ -352,7 +355,7 @@ void launch_rtn_sbvr_1xtN_mm_T(
     int N, int K,
     int device_id = 0)
 {
-    const bool use_r_uint8 = (r_cache_size < 256);
+    const bool use_r_uint8 = (r_cache_size <= 256);
     
     if (use_r_uint8) {
         switch (r_num_sums) {
@@ -424,19 +427,11 @@ void launch_fused_rtn_7_sbvr_1xtN_mm_T_kernel_wrapper(
 
     // launch the kernels in sequential manner
     fused_rtn7_lut_bvr<<<grid_rtn_input, block_rtn_input>>>(x, d_bvr_ptr, d_scales_ptr, num_groups);
-
-
     rtn_7_sbvr_1xtN_mm_T<RIndexT, RNumSums, _1xtN_tN><<<blocks_mm_T, threads_mm_T>>>(
                 d_bvr_ptr, d_scales_ptr,
                 r_bvr, (RIndexT*)r_coeff_idx, r_coeff_cache,
                 bias, out,
                 N, K / 32);
-    
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
-        throw std::runtime_error("CUDA error2");
-    }
 
 }
 
