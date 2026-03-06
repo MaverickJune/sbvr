@@ -7,3 +7,5 @@ sentencepiece
 tensorboardX
 lm-eval==0.4.3
 datasets==3.6.0
+
+# pip install -e . --no-build-isolation

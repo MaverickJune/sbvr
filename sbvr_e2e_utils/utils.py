@@ -1,7 +1,27 @@
 import torch
-from transformers import LlamaForCausalLM
+# from transformers import LlamaForCausalLM
 # from transformers import Qwen3ForCausalLM
 from utils.utils import cleanup_memory
+
+try:
+    from transformers import LlamaForCausalLM
+    LLAMA_IMPORT_ERROR = None
+except Exception as exc:
+    LlamaForCausalLM = None
+    LLAMA_IMPORT_ERROR = exc
+try:
+    from transformers import Qwen3ForCausalLM
+    QWEN_IMPORT_ERROR = None
+except Exception as exc:  # Keep Llama path working even if optional Qwen deps mismatch.
+    Qwen3ForCausalLM = None
+    QWEN_IMPORT_ERROR = exc
+try:
+    from transformers import Qwen2ForCausalLM
+    QWEN2_IMPORT_ERROR = None
+except Exception as exc:  # Keep Llama path working even if optional Qwen deps mismatch.
+    Qwen2ForCausalLM = None
+    QWEN2_IMPORT_ERROR = exc
+
 
 def r_str(s):
     return "\033[91m" + str(s) + "\033[0m"
@@ -71,9 +91,7 @@ def get_partial_state(args):
             torch_dtype="auto",
             device_map="cpu"
         ).eval()
-        
         raw_state = ref.state_dict()
-
         filtered_state = {
             k: v for k, v in raw_state.items()
             if (
@@ -87,6 +105,30 @@ def get_partial_state(args):
                 )
             )
         }
+    elif "qwen2" in model_name.lower():
+        print("Getting Partial State for Qwen2 Model...")
+        ref = Qwen2ForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype="auto",
+            device_map="cpu"
+        ).eval()
+        raw_state = ref.state_dict()
+        filtered_state = {
+            k: v for k, v in raw_state.items()
+            if (
+                "mlp" not in k
+                and "quantizer" not in k
+                and (
+                    "self_attn" not in k
+                    or "q_norm" in k
+                    or "k_norm" in k
+                    or k.endswith("bias")
+                )
+            )
+        }
+        
+    else:
+        raise ValueError(f"Unsupported model type: {model_name}")
     
     del ref, raw_state
     cleanup_memory()

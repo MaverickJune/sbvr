@@ -153,7 +153,7 @@ def _make_cg_runner(fn, example_inp):
     """
     Capture `fn(example_inp)` into a CUDA graph and return a wrapper
     that takes a *tensor with the same shape/dtype* and returns the
-    graph’s output buffer.
+    graph's output buffer.
 
     ──  How it works  ───────────────────────────────────────────────
       • create a stub copy of the example input
@@ -179,7 +179,7 @@ def _make_cg_runner(fn, example_inp):
 
     # ------- 2) graph capture -------------------------------------
     g = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(g):
+    with torch.inference_mode(), torch.cuda.graph(g):
         out_buf.copy_(fn(stub_in))
 
     # ------- 3) wrapped callable ----------------------------------
@@ -189,3 +189,59 @@ def _make_cg_runner(fn, example_inp):
         return out_buf
 
     return cg_fn
+
+@torch.inference_mode()
+def validate_cg_runner():
+    import torch
+
+    torch.manual_seed(42)
+    device = "cuda"
+
+    # ── 1) matmul 기반 fn ──────────────────────────────────────
+    W = torch.randn(128, 64, device=device, dtype=torch.float16)
+
+    def fn(x):
+        return x @ W
+
+    # ── 2) cg_runner 생성 ──────────────────────────────────────
+    example_inp = torch.randn(32, 128, device=device, dtype=torch.float16)
+    cg_fn = _make_cg_runner(fn, example_inp)
+
+    # ── 3) 여러 입력에 대해 eager vs graph 비교 + aliasing 검증 ─
+    num_tests = 5
+    prev_cloned = None  # 직전 graph 결과의 clone
+
+    for i in range(num_tests):
+        x = torch.randn_like(example_inp)
+        eager_out = fn(x)
+        graph_out = cg_fn(x)          # out_buf 참조
+
+        assert eager_out.shape == graph_out.shape, \
+            f"[test {i}] shape mismatch: {eager_out.shape} vs {graph_out.shape}"
+        assert eager_out.dtype == graph_out.dtype, \
+            f"[test {i}] dtype mismatch: {eager_out.dtype} vs {graph_out.dtype}"
+
+        max_diff = (eager_out - graph_out).abs().max().item()
+        print(f"  [test {i}] max |eager − graph| = {max_diff:.5f}")
+
+        # aliasing 검증: 이전 clone이 현재 replay로 오염되지 않았는지
+        if prev_cloned is not None:
+            prev_eager = fn(prev_x)
+            alias_diff = (prev_cloned - prev_eager).abs().max().item()
+            print(f"          aliasing check (prev clone vs prev eager) = {alias_diff:.5f}")
+
+        prev_cloned = graph_out.clone()
+        prev_x = x.clone()
+
+    # ── 4) shape mismatch → RuntimeError 확인 ──────────────────
+    wrong_shape = torch.randn(16, 128, device=device, dtype=torch.float16)
+    try:
+        cg_fn(wrong_shape)
+        print("⚠️  shape mismatch가 에러 없이 통과됨 — 주의 필요")
+    except RuntimeError:
+        print("✅ shape mismatch 시 RuntimeError 정상 발생")
+
+    print(f"✅ validate_cg_runner done — {num_tests} tests")
+    
+if __name__ == "__main__":
+    validate_cg_runner()

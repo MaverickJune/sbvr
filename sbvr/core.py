@@ -51,6 +51,14 @@ class sbvr(torch.nn.Module):
             else:
                 self.input_coeff = None
                 
+            if encoder_config is not None:
+                # It means bias config is provided, we need to set up the bias attribute
+                self.has_bias = encoder_config.get("has_bias", False)
+                self.bias_shape = encoder_config.get("bias_shape", None)
+            else:
+                self.has_bias = False
+                self.bias_shape = None
+                
             self._get_dummy_bias()
         else:
             if encoder_config is None:
@@ -81,6 +89,12 @@ class sbvr(torch.nn.Module):
                         f"{self._get_bvr_num_bits()}")
                 
             self.input_num_sums = -1
+            
+            # (wjbang, 2026.03.06), added attributes for bias handling
+            self.has_bias = self.encoder.has_bias
+            self.bias_shape = self.encoder.bias_shape
+            if self.has_bias and self.bias_shape is None:
+                raise ValueError(r_str("bias_shape must be provided when has_bias is True"))
         
             self.bvr = None
             self.coeff_idx = None
@@ -141,11 +155,21 @@ class sbvr(torch.nn.Module):
         return padded_input_shape
 
     def _get_dummy_bias(self):
-        if not hasattr(self, 'dummy_bias'):
-            self.dummy_bias = torch.zeros([0],
-                                          dtype=self.compute_dtype,
-                                          device=self.coeff_cache.device)
-        return self.dummy_bias
+        if not hasattr(self, 'bias'):
+            # 1. 0으로 채워진 텐서 생성
+            if not self.has_bias:
+                tmp_tensor = torch.zeros([0], 
+                                        dtype=self.compute_dtype, 
+                                        device=self.coeff_cache.device)
+            else:
+                tmp_tensor = torch.zeros(self.bias_shape, 
+                                        dtype=self.compute_dtype, 
+                                        device=self.coeff_cache.device)
+            
+            # 2. nn.Parameter로 생성 (requires_grad=False로 설정하여 gradient 계산 제외)
+            self.bias = nn.Parameter(tmp_tensor, requires_grad=False)
+            
+        return self.bias
     
     def _set_rtn_bits(self, num_bits):
         '''
@@ -490,7 +514,7 @@ class sbvr(torch.nn.Module):
         '''
         self._get_dummy_bias()
         return _sbvr_prefill(
-            x, self.bvr, self.coeff_idx, self.coeff_cache, self.dummy_bias
+            x, self.bvr, self.coeff_idx, self.coeff_cache, self.bias
         )
         
     @torch.inference_mode()
@@ -551,10 +575,18 @@ def input_sbvr_mm_T(input_bvr, input_coeff_idx, input_coeff_set,
     return _sbvr_mm_T(input_bvr, input_coeff_idx, input_coeff_set,
                 w_sbvr.bvr, w_sbvr.coeff_idx, w_sbvr.coeff_cache, bias)
     
-def load(filename, device=None, verbose_level=1, apply_dtype_conv=False, target_dtype=None) -> sbvr:
+def load(filename, device=None, verbose_level=1, apply_dtype_conv=False, target_dtype=None, has_bias=False, bias_shape=None) -> sbvr:
     serialized_sbvr = torch.load(filename)
+    
+    #(wjbang, 2026.03.06), added attributes for bias handling
+    if has_bias:
+        encoder_config = {
+            "has_bias": has_bias,
+            "bias_shape": bias_shape
+        }
+        
     sbvr_obj = sbvr(serialized=serialized_sbvr, 
-                    verbose_level=verbose_level, device=device)
+                    verbose_level=verbose_level, device=device, encoder_config=encoder_config if has_bias else None)
     sbvr_obj.verbose_level = verbose_level
     if apply_dtype_conv:
         if target_dtype is None:

@@ -29,6 +29,10 @@ class sbvr_encoder():
         self.compute_dtype = kwargs.get("compute_dtype", torch.float16)
         self.enable_blockwise_gptq = kwargs.get("enable_blockwise_gptq", False)
         
+        # (wjbang, 2026.03.06), added config for bias setting
+        self.has_bias = kwargs.get("has_bias", False)
+        self.bias_shape = kwargs.get("bias_shape", None)
+        
         # for input sbvrization
         self.rtn_bits = kwargs.get("rtn_bits", 7)
         self.rtn_group_size = kwargs.get("rtn_group_size", 128)

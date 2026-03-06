@@ -87,10 +87,10 @@ class Qwen2MLP(nn.Module):
             verbose_level=1
         )
         self.act_fn = ACT2FN[config.hidden_act]
-        self.had_K, self.K = hadamard_utils.get_hadK(self.intermediate_size)
+        # self.had_K, self.K = hadamard_utils.get_hadK(self.intermediate_size)
 
-        if self.had_K is not None:
-            self.had_K = self.had_K.to("cuda:0")
+        # if self.had_K is not None:
+        #     self.had_K = self.had_K.to("cuda:0")
         ###
 
 
@@ -99,7 +99,7 @@ class Qwen2MLP(nn.Module):
         # debug mode: Restore weights and run the forward pass
         if debug_mode:
             x = self.act_fn(self.gate_proj.debug_forward(x)) * self.up_proj.debug_forward(x)
-            x = hadamard_utils.matmul_hadU_cuda(x, self.had_K, self.K)
+            # x = hadamard_utils.matmul_hadU_cuda(x, self.had_K, self.K)
             x = self.down_proj.debug_forward(x)
             return x
     
@@ -109,14 +109,14 @@ class Qwen2MLP(nn.Module):
             # prefill stage or multiple tokens, GEMM
             x = x.view(seq_len, -1)
             x = self.act_fn(self.gate_proj.p_forward(x)) * self.up_proj.p_forward(x)
-            x = hadamard_utils.matmul_hadU_cuda(x, self.had_K, self.K)
+            # x = hadamard_utils.matmul_hadU_cuda(x, self.had_K, self.K)
             x = self.down_proj.p_forward(x)   
         else:
             # decode stage or single token, GEMV
             x = x.view(-1, x.shape[-1])
             out_bvr, scales = _sbvr_input_transfrom(x, nRTN=self.rtn_bits, group_size=self.rtn_group_size)
             x = self.act_fn(self.gate_proj.d_forward(out_bvr=out_bvr, scales=scales)) * self.up_proj.d_forward(out_bvr=out_bvr, scales=scales)
-            x = hadamard_utils.matmul_hadU_cuda(x, self.had_K, self.K)
+            # x = hadamard_utils.matmul_hadU_cuda(x, self.had_K, self.K)
             x = self.down_proj.d_forward(x)
         # reshape the output
         x = x.view(bsz, seq_len, -1)
@@ -244,13 +244,16 @@ class Qwen2Attention(nn.Module):
         ### sbvr
         self.rtn_bits = config.rtn_bits
         self.rtn_group_size = config.rtn_group_size
-
+        
+        # (wjbang, 2026.03.06), added bias config to q, k, v
         self.q_proj = sbvr.sbvr(
             encoder_config={
                 "num_sums": config.weight_num_sums,
                 "bvr_len": config.weight_bvr_len,
                 "rtn_bits": config.rtn_bits,
-                "rtn_group_size": config.rtn_group_size
+                "rtn_group_size": config.rtn_group_size,
+                "has_bias": True,
+                "bias_shape": config.hidden_size
             },
             verbose_level=1
         )
@@ -259,7 +262,9 @@ class Qwen2Attention(nn.Module):
                 "num_sums": config.weight_num_sums,
                 "bvr_len": config.weight_bvr_len,
                 "rtn_bits": config.rtn_bits,
-                "rtn_group_size": config.rtn_group_size
+                "rtn_group_size": config.rtn_group_size,
+                "has_bias": True,
+                "bias_shape": config.hidden_size // self.num_key_value_groups
             },
             verbose_level=1
         )
@@ -268,7 +273,9 @@ class Qwen2Attention(nn.Module):
                 "num_sums": config.weight_num_sums,
                 "bvr_len": config.weight_bvr_len,
                 "rtn_bits": config.rtn_bits,
-                "rtn_group_size": config.rtn_group_size
+                "rtn_group_size": config.rtn_group_size,
+                "has_bias": True,
+                "bias_shape": config.hidden_size // self.num_key_value_groups
             },
             verbose_level=1
         )
@@ -710,13 +717,13 @@ class Qwen2ForSbvrLM(Qwen2PreTrainedModel, GenerationMixin):
             sbvr_gate_proj_path = os.path.join(root_sbvr_path, f"sbvr_layer_{layer_idx}_mlp.gate_proj.module.pt")
             sbvr_down_proj_path = os.path.join(root_sbvr_path, f"sbvr_layer_{layer_idx}_mlp.down_proj.module.pt")
             
-            layer.self_attn.q_proj = sbvr.load(sbvr_q_proj_path)
+            layer.self_attn.q_proj = sbvr.load(sbvr_q_proj_path, has_bias=True, bias_shape=self.config.hidden_size)
             layer.self_attn.q_proj._set_rtn_bits(self.rtn_bits)
             
-            layer.self_attn.k_proj = sbvr.load(sbvr_k_proj_path)
+            layer.self_attn.k_proj = sbvr.load(sbvr_k_proj_path, has_bias=True, bias_shape=self.config.hidden_size // layer.self_attn.num_key_value_groups)
             layer.self_attn.k_proj._set_rtn_bits(self.rtn_bits)
             
-            layer.self_attn.v_proj = sbvr.load(sbvr_v_proj_path)
+            layer.self_attn.v_proj = sbvr.load(sbvr_v_proj_path, has_bias=True, bias_shape=self.config.hidden_size // layer.self_attn.num_key_value_groups)
             layer.self_attn.v_proj._set_rtn_bits(self.rtn_bits)
             
             layer.self_attn.o_proj = sbvr.load(sbvr_o_proj_path)

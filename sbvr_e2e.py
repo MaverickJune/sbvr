@@ -1,7 +1,28 @@
 import torch
 import argparse
-from eval_utils.modeling_llama_sbvr_4_44_2 import LlamaForSbvrLM
+
+try:
+    from eval_utils.modeling_llama_sbvr_4_44_2 import LlamaForSbvrLM
+    _LLAMA_IMPORT_ERROR = None
+except Exception as exc:
+    LlamaForSbvrLM = None
+    _LLAMA_IMPORT_ERROR = exc
+try:
+    from eval_utils.modeling_qwen3_sbvr_4_53_2 import Qwen3ForSbvrLM
+    _QWEN_IMPORT_ERROR = None
+except Exception as exc:  # Keep Llama path working even if optional Qwen deps mismatch.
+    Qwen3ForSbvrLM = None
+    _QWEN_IMPORT_ERROR = exc
+try:
+    from eval_utils.modeling_qwen2_sbvr_4_53_2 import Qwen2ForSbvrLM
+    _QWEN2_IMPORT_ERROR = None
+except Exception as exc:  # Keep Llama path working even if optional Qwen deps mismatch.
+    Qwen2ForSbvrLM = None
+    _QWEN2_IMPORT_ERROR = exc
+
+# from eval_utils.modeling_llama_sbvr_4_44_2 import LlamaForSbvrLM
 # from eval_utils.modeling_qwen3_sbvr_4_53_2 import Qwen3ForSbvrLM
+# from eval_utils.modeling_qwen2_sbvr_4_53_2 import Qwen2ForSbvrLM
 from transformers import AutoTokenizer, AutoConfig, LlamaTokenizerFast
 from sbvr_e2e_utils.eval_ppl import r_str, g_str, y_str, b_str
 from paper_eval_package.cudagraph_utils import attach_cudagraph_generate
@@ -18,6 +39,132 @@ from transformers.cache_utils import StaticCache
 # from cudagraph_utils import attach_cudagraph_generate
 
 import sys
+
+# (wjbang, 2026.03.06)
+# This function is almost identical with main(), but only returns the sbvrized model without running any evaluation.
+def load_sbvr_qwen2_model(
+    root_sbvr_path: str,
+    input_model: str,
+    weight_bvr_len: int = 128,
+    weight_num_sums: int = 4,
+    rtn_group_size: int = 128,
+    rtn_bits: int = 7
+):
+    # Check the transformer version (only allows transformers v4.44.2 for now)
+    import transformers
+    assert transformers.__version__ == "4.53.2", (
+        f"This function requires transformers v4.53.2, but found v{transformers.__version__}"
+    )
+    
+    args = argparse.Namespace(
+        root_sbvr_path=root_sbvr_path,
+        input_model=input_model,
+        weight_bvr_len=weight_bvr_len,
+        weight_num_sums=weight_num_sums,
+        rtn_group_size=rtn_group_size,
+        rtn_bits=rtn_bits,
+        flash_attn=False
+    )
+    
+    filtered_state = get_partial_state(args)
+    sbvr_state_dict = {
+        "weight_bvr_len": args.weight_bvr_len,
+        "weight_num_sums": args.weight_num_sums,
+        "rtn_group_size": args.rtn_group_size,
+        "rtn_bits": args.rtn_bits,
+    }
+    config = AutoConfig.from_pretrained(args.input_model)
+    
+    # Llama v3.2 specific: Spinquant is not compatiable with tie_word_embeddings, 
+    # clone lm_head from embed_tokens
+    process_word_embeddings = False
+    if config.tie_word_embeddings:
+        config.tie_word_embeddings = False
+        process_word_embeddings = True
+
+    model = Qwen2ForSbvrLM(config=config, sbvr_state_dict=sbvr_state_dict)
+    model.load_sbvr_weights(args.root_sbvr_path)
+    # fill partial state
+    missing, unexpected = model.load_state_dict(
+        filtered_state,
+        strict=False
+    )
+    if len(unexpected) > 0:
+        raise ValueError(f"Unexpected keys: {unexpected}")
+    
+    if process_word_embeddings:
+        model.lm_head.weight.data = model.model.embed_tokens.weight.data.clone()
+    # convert the model to float16
+    model.convert_model_dtype(dtype=torch.float16)
+    model = model.to("cuda:0")
+    model.eval()
+    model.config._attn_implementation = "flash_attention" if args.flash_attn else "sdpa"
+    
+    return model
+
+# (wjbang, 2026.03.05)
+# This function is almost identical with main(), but only returns the sbvrized model without running any evaluation.
+def load_sbvr_llama_model(
+    root_sbvr_path: str,
+    input_model: str,
+    weight_bvr_len: int = 128,
+    weight_num_sums: int = 4,
+    rtn_group_size: int = 128,
+    rtn_bits: int = 7
+):
+    # Check the transformer version (only allows transformers v4.44.2 for now)
+    import transformers
+    assert transformers.__version__ == "4.44.2", (
+        f"This function requires transformers v4.44.2, but found v{transformers.__version__}"
+    )
+    
+    args = argparse.Namespace(
+        root_sbvr_path=root_sbvr_path,
+        input_model=input_model,
+        weight_bvr_len=weight_bvr_len,
+        weight_num_sums=weight_num_sums,
+        rtn_group_size=rtn_group_size,
+        rtn_bits=rtn_bits,
+        flash_attn=False
+    )
+    
+    filtered_state = get_partial_state(args)
+    sbvr_state_dict = {
+        "weight_bvr_len": args.weight_bvr_len,
+        "weight_num_sums": args.weight_num_sums,
+        "rtn_group_size": args.rtn_group_size,
+        "rtn_bits": args.rtn_bits,
+    }
+    config = AutoConfig.from_pretrained(args.input_model)
+    
+    # Llama v3.2 specific: Spinquant is not compatiable with tie_word_embeddings, 
+    # clone lm_head from embed_tokens
+    process_word_embeddings = False
+    if config.tie_word_embeddings:
+        config.tie_word_embeddings = False
+        process_word_embeddings = True
+    
+    model = LlamaForSbvrLM(config=config, sbvr_state_dict=sbvr_state_dict)
+    # fill partial state
+    missing, unexpected = model.load_state_dict(
+        filtered_state,
+        strict=False
+    )
+    if len(unexpected) > 0:
+        raise ValueError(f"Unexpected keys: {unexpected}")
+    
+    if process_word_embeddings:
+        model.lm_head.weight.data = model.model.embed_tokens.weight.data.clone()
+    model.load_sbvr_weights(args.root_sbvr_path)
+    # convert the model to float16
+    model.convert_model_dtype(dtype=torch.float16)
+    model.preprocess_model()
+    model = model.to("cuda:0")
+    model.eval()
+    model.config._attn_implementation = "flash_attention" if args.flash_attn else "sdpa"
+    
+    return model
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -89,11 +236,19 @@ def main():
                 torch_dtype="auto",
                 low_cpu_mem_usage=False
             )
+        elif "Qwen2" in args.input_model:
+            model = Qwen2ForSbvrLM.from_pretrained(
+                args.load_qmodel_path,
+                torch_dtype="auto",
+                low_cpu_mem_usage=False
+            )
     else:
         if "Llama" in args.input_model:
             model = LlamaForSbvrLM(config=config, sbvr_state_dict=sbvr_state_dict)
         elif "Qwen3" in args.input_model:
             model = Qwen3ForSbvrLM(config=config, sbvr_state_dict=sbvr_state_dict)
+        elif "Qwen2" in args.input_model:
+            model = Qwen2ForSbvrLM(config=config, sbvr_state_dict=sbvr_state_dict)
         else:
             print(args.input_model)
             raise ValueError(f"Unsupported model type: {args.input_model}")
