@@ -1,5 +1,23 @@
 import torch
 import argparse
+import sys
+import random
+import os
+
+DEFAULT_SEED = 42
+def set_deterministic_seed(seed: int = DEFAULT_SEED):
+    """Fix all random sources so that every run produces identical values."""
+    random.seed(seed)
+    torch.manual_seed(seed)          # covers both CPU and CUDA
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    # Set CUBLAS workspace config for deterministic cuBLAS calls
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    print(f"[seed] All random sources fixed with seed={seed}")
+    
+set_deterministic_seed()
 
 try:
     from eval_utils.modeling_llama_sbvr_4_44_2 import LlamaForSbvrLM
@@ -38,8 +56,6 @@ import contextlib
 from transformers.cache_utils import StaticCache
 # from cudagraph_utils import attach_cudagraph_generate
 
-import sys
-
 # (wjbang, 2026.03.06)
 # This function is almost identical with main(), but only returns the sbvrized model without running any evaluation.
 def load_sbvr_qwen2_model(
@@ -50,7 +66,7 @@ def load_sbvr_qwen2_model(
     rtn_group_size: int = 128,
     rtn_bits: int = 7
 ):
-    # Check the transformer version (only allows transformers v4.44.2 for now)
+    # Check the transformer version (only allows transformers v4.53.2 for now)
     import transformers
     assert transformers.__version__ == "4.53.2", (
         f"This function requires transformers v4.53.2, but found v{transformers.__version__}"
