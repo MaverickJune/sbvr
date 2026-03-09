@@ -57,6 +57,7 @@ def sbvrize_model(args, model, model_args=None):
             
             # call the sbvr_ptq function
             gptq_utils_4_53_2.sbvrize_fwrd(model, dataloader=trainloader, args=args)
+            # gptq_utils_4_44_2.sbvrize_fwrd(model, dataloader=trainloader, args=args)
             
     if args.a_bits < 16 or args.v_bits < 16:
         raise ValueError("Activation and Value quantization is not supported for SBVR PTQ")

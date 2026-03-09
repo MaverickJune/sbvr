@@ -426,7 +426,8 @@ def _make_cg_runner(fn, example_inp):
     # ------- 1) allocate stubs & prime kernels ---------------------
     stub_in  = torch.empty_like(example_inp, device=device, dtype=dtype)
     with torch.inference_mode():
-        ref_out = fn(example_inp)          # first eager run → allocs weights
+        for _ in range(3):
+            ref_out = fn(example_inp)
     out_buf = torch.empty_like(ref_out, device=device, dtype=ref_out.dtype)
 
     # tiny GEMM to make sure cuBLAS / Triton has loaded its kernels

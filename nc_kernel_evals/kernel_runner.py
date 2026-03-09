@@ -317,7 +317,7 @@ def profile_single_kernel_run(
     if kernel_name == "fused_rtn_lut_bvr":
         # Create dummy data
         (x,) = create_dummy_input_transform_tensors(K=K, device=device)
-        x = x.squeeze(0)  # Make 1D
+        # x = x.squeeze(0)  # Make 1D
         
         # Single kernel run for profiling
         torch.cuda.synchronize()
