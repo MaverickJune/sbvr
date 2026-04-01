@@ -46,7 +46,7 @@ usage() {
     echo ""
     echo "Options:"
     echo "  -k, --kernel KERNEL     Kernel to profile (fused_rtn_lut_bvr, rtn_sbvr_mm, fused_rtn_sbvr_mm, or all)"
-    echo "  -c, --config CONFIG     Test configuration (small, medium, large, llama_7b_attn, llama_7b_ffn_up, llama_7b_ffn_down, llama_70b_ffn_gate)"
+    echo "  -c, --config CONFIG     Test configuration (tiny, small, medium, large, llama_7b_attn, llama_7b_ffn_up, llama_7b_ffn_down, llama_70b_ffn_gate)"
     echo "  -n, --nRTN N            RTN bit width (3, 5, or 7, default: 7)"
     echo "  -o, --output DIR        Output directory for NCU reports"
     echo "  -m, --metrics SET       Metrics set (full, roofline, summary)"
@@ -71,6 +71,7 @@ usage() {
 # List available configurations
 list_configs() {
     echo "Available configurations:"
+    echo "  tiny          - N=1024, K=1024"
     echo "  small         - N=2048, K=2048"
     echo "  medium        - N=4096, K=4096"
     echo "  large         - N=8192, K=8192"
@@ -156,6 +157,7 @@ mkdir -p "$OUTPUT_DIR"
 get_config_dims() {
     local cfg=$1
     case $cfg in
+        tiny) echo "1024 1024" ;;
         small) echo "2048 2048" ;;
         medium) echo "4096 4096" ;;
         large) echo "8192 8192" ;;
